@@ -1,0 +1,4 @@
+skinned_simplify_test
+dump_lod
+results/*.skin
+*.o

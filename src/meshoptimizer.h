@@ -564,6 +564,34 @@ MESHOPTIMIZER_API size_t meshopt_simplifyWithAttributes(unsigned int* destinatio
 MESHOPTIMIZER_API size_t meshopt_simplifyWithUpdate(unsigned int* indices, size_t index_count, float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, float* vertex_attributes, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* result_error);
 
 /**
+ * Mesh simplifier with skinning (bone weight) constraints
+ * Reduces the number of triangles in the mesh while preserving skinning boundaries.
+ * Similar to meshopt_simplify, but edges whose endpoints reference different bone sets are never collapsed:
+ * an edge is locked when the endpoints have a common bone whose weight difference exceeds bone_weight_limit,
+ * or when one endpoint references a bone that the other one doesn't reference at all.
+ * Since locked edges can't be collapsed, every vertex in the output keeps the exact bone indices/weights
+ * of one of the input vertices - no new weight combinations are ever created.
+ * The lock is transitive across collapse passes: a surviving vertex tracks the weight envelope of every
+ * source vertex it represents, so chains of collapses can never quietly cross a bone boundary.
+ * Returns the number of indices after simplification, with destination containing new index data
+ *
+ * The resulting index buffer references vertices from the original vertex buffer.
+ * If the original vertex data isn't needed, creating a compact vertex buffer using meshopt_optimizeVertexFetch is recommended.
+ *
+ * destination must contain enough space for the target index buffer, worst case is index_count elements (*not* target_index_count)!
+ * vertex_positions should have float3 position in the first 12 bytes of each vertex
+ * vertex_bone_weights has 4 floats per vertex; weights are expected to be normalized but this isn't enforced
+ * vertex_bone_indices has 4 unsigned ints per vertex; entries with zero weight are ignored
+ * bone_weight_limit must be in [0..1]; 0.2 is a reasonable default for wrist/knee-like seams
+ * vertex_remap can be NULL; when it's not NULL, it must have vertex_count elements and receives the index of
+ * the source vertex that each surviving vertex was collapsed onto (identity for vertices that survive unchanged);
+ * vertices that are not referenced by the result are set to ~0u
+ * options must be a bitmask composed of meshopt_SimplifyX options; 0 is a safe default
+ * result_error can be NULL; when it's not NULL, it will contain the resulting (relative/absolute) error after simplification
+ */
+MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySkinned(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_bone_weights, const unsigned int* vertex_bone_indices, float bone_weight_limit, unsigned int* vertex_remap, size_t target_index_count, float target_error, unsigned int options, float* result_error);
+
+/**
  * Mesh simplifier (sloppy)
  * Reduces the number of triangles in the mesh, sacrificing mesh appearance for simplification performance
  * The algorithm doesn't preserve mesh topology but can stop short of the target goal based on target error.

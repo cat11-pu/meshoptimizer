@@ -1,0 +1,37 @@
+== arm_cylinder: 2009 vertices, 3840 triangles, 194 bone-boundary edges (limit 0.20) ==
+skinned      LOD0  tris=  2880 ( 25.0% reduced)  weightRMS=0.7226 weightMax=1.2000 inherit=0.000  seamKeep=100.0%  animRMS=0.53807 animMax=0.69850  geoErr=0.0000
+plain        LOD0  tris=  2880 ( 25.0% reduced)  weightRMS=0.7239 weightMax=1.4000 inherit=0.000  seamKeep= 90.7%  animRMS=0.53813 animMax=0.69969  geoErr=0.0000
+skinned      LOD1  tris=  1919 ( 50.0% reduced)  weightRMS=0.7503 weightMax=1.4000 inherit=0.000  seamKeep=100.0%  animRMS=0.54768 animMax=0.70032  geoErr=0.0000
+plain        LOD1  tris=  1920 ( 50.0% reduced)  weightRMS=0.7629 weightMax=2.1429 inherit=0.000  seamKeep= 62.4%  animRMS=0.55060 animMax=0.75469  geoErr=0.0000
+skinned      LOD2  tris=  1343 ( 65.0% reduced)  weightRMS=0.7507 weightMax=1.4286 inherit=0.000  seamKeep=100.0%  animRMS=0.55635 animMax=0.70086  geoErr=0.0001
+plain        LOD2  tris=  1344 ( 65.0% reduced)  weightRMS=0.7712 weightMax=1.8750 inherit=0.000  seamKeep= 53.1%  animRMS=0.56542 animMax=0.73373  geoErr=0.0001
+skinned      LOD3  tris=   768 ( 80.0% reduced)  weightRMS=0.7696 weightMax=1.4583 inherit=0.000  seamKeep=100.0%  animRMS=0.55561 animMax=0.70094  geoErr=0.0001
+plain        LOD3  tris=   768 ( 80.0% reduced)  weightRMS=0.9468 weightMax=2.0000 inherit=0.000  seamKeep= 27.3%  animRMS=0.55280 animMax=0.93315  geoErr=0.0001
+skinned      LOD4  tris=   384 ( 90.0% reduced)  weightRMS=0.9240 weightMax=1.4762 inherit=0.000  seamKeep=100.0%  animRMS=0.54021 animMax=0.70113  geoErr=0.0001
+plain        LOD4  tris=   384 ( 90.0% reduced)  weightRMS=0.8898 weightMax=2.1429 inherit=0.000  seamKeep= 14.4%  animRMS=0.56276 animMax=0.97471  geoErr=0.0001
+
+== cloth_sheet: 2401 vertices, 4608 triangles, 720 bone-boundary edges (limit 0.20) ==
+skinned      LOD0  tris=  3456 ( 25.0% reduced)  weightRMS=0.4832 weightMax=1.0556 inherit=0.000  seamKeep=100.0%  animRMS=0.00199 animMax=0.03093  geoErr=0.0001
+plain        LOD0  tris=  3456 ( 25.0% reduced)  weightRMS=0.4886 weightMax=1.3214 inherit=0.000  seamKeep= 88.8%  animRMS=0.00579 animMax=0.15316  geoErr=0.0001
+skinned      LOD1  tris=  2303 ( 50.0% reduced)  weightRMS=0.4838 weightMax=1.0667 inherit=0.000  seamKeep=100.0%  animRMS=0.00262 animMax=0.03299  geoErr=0.0001
+plain        LOD1  tris=  2303 ( 50.0% reduced)  weightRMS=0.5013 weightMax=1.4167 inherit=0.000  seamKeep= 73.3%  animRMS=0.01043 animMax=0.16494  geoErr=0.0001
+skinned      LOD2  tris=  1612 ( 65.0% reduced)  weightRMS=0.4862 weightMax=1.0667 inherit=0.000  seamKeep=100.0%  animRMS=0.00345 animMax=0.04554  geoErr=0.0001
+plain        LOD2  tris=  1611 ( 65.0% reduced)  weightRMS=0.5128 weightMax=1.7500 inherit=0.000  seamKeep= 63.2%  animRMS=0.01351 animMax=0.21991  geoErr=0.0001
+skinned      LOD3  tris=   920 ( 80.0% reduced)  weightRMS=0.4877 weightMax=1.0769 inherit=0.000  seamKeep=100.0%  animRMS=0.00431 animMax=0.04882  geoErr=0.0003
+plain        LOD3  tris=   920 ( 80.0% reduced)  weightRMS=0.5303 weightMax=1.7500 inherit=0.000  seamKeep= 40.6%  animRMS=0.01755 animMax=0.21991  geoErr=0.0002
+skinned      LOD4  tris=   459 ( 90.0% reduced)  weightRMS=0.4907 weightMax=1.0795 inherit=0.000  seamKeep=100.0%  animRMS=0.00602 animMax=0.04882  geoErr=0.0006
+plain        LOD4  tris=   460 ( 90.0% reduced)  weightRMS=0.5619 weightMax=1.9444 inherit=0.000  seamKeep= 23.3%  animRMS=0.02546 animMax=0.26331  geoErr=0.0004
+
+== leg_knee: 1517 vertices, 2880 triangles, 162 bone-boundary edges (limit 0.20) ==
+skinned      LOD0  tris=  2160 ( 25.0% reduced)  weightRMS=0.7067 weightMax=1.3333 inherit=0.000  seamKeep=100.0%  animRMS=0.00555 animMax=0.12533  geoErr=0.0000
+plain        LOD0  tris=  2160 ( 25.0% reduced)  weightRMS=0.7127 weightMax=1.3333 inherit=0.000  seamKeep=100.0%  animRMS=0.00920 animMax=0.14890  geoErr=0.0000
+skinned      LOD1  tris=  1440 ( 50.0% reduced)  weightRMS=0.7208 weightMax=1.4000 inherit=0.000  seamKeep=100.0%  animRMS=0.01156 animMax=0.17880  geoErr=0.0000
+plain        LOD1  tris=  1440 ( 50.0% reduced)  weightRMS=0.7440 weightMax=1.4375 inherit=0.000  seamKeep=100.0%  animRMS=0.02084 animMax=0.20889  geoErr=0.0000
+skinned      LOD2  tris=  1008 ( 65.0% reduced)  weightRMS=0.7466 weightMax=1.4444 inherit=0.000  seamKeep=100.0%  animRMS=0.02346 animMax=0.21221  geoErr=0.0001
+plain        LOD2  tris=  1008 ( 65.0% reduced)  weightRMS=0.7866 weightMax=1.4615 inherit=0.000  seamKeep=100.0%  animRMS=0.03118 animMax=0.22853  geoErr=0.0000
+skinned      LOD3  tris=   576 ( 80.0% reduced)  weightRMS=0.7521 weightMax=1.4286 inherit=0.000  seamKeep=100.0%  animRMS=0.02236 animMax=0.20632  geoErr=0.0001
+plain        LOD3  tris=   575 ( 80.0% reduced)  weightRMS=0.8261 weightMax=1.4722 inherit=0.000  seamKeep=100.0%  animRMS=0.03790 animMax=0.22853  geoErr=0.0001
+skinned      LOD4  tris=   288 ( 90.0% reduced)  weightRMS=0.8892 weightMax=1.4722 inherit=0.000  seamKeep=100.0%  animRMS=0.04920 animMax=0.23675  geoErr=0.0001
+plain        LOD4  tris=   288 ( 90.0% reduced)  weightRMS=0.9499 weightMax=1.4722 inherit=0.000  seamKeep=100.0%  animRMS=0.05889 animMax=0.23500  geoErr=0.0001
+
+ALL CHECKS PASSED

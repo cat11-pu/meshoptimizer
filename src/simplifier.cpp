@@ -334,6 +334,209 @@ const unsigned char kHasOpposite[Kind_Count][Kind_Count] = {
     {1, 0, 1, 0, 0, 0},
 };
 
+struct SkinConstraint
+{
+	const float* vertex_bone_weights;
+	const unsigned int* vertex_bone_indices;
+	float bone_weight_limit;
+
+	// per-vertex weight envelope over all source vertices that a surviving vertex represents;
+	// this makes the constraint transitive across chains of collapses in successive passes
+	float* envelope_min;
+	float* envelope_max;
+	unsigned int* envelope_bones;
+	size_t envelope_stride;
+};
+
+// merges the weight envelope of vertex src into vertex dst (used after a collapse)
+// returns false when the dst envelope can't represent the union, in which case the edge must stay locked
+static bool mergeSkinEnvelope(SkinConstraint& skin, unsigned int dst, unsigned int src)
+{
+	if (!skin.envelope_min)
+		return true;
+
+	size_t stride = skin.envelope_stride;
+
+	for (size_t j = 0; j < stride; ++j)
+	{
+		unsigned int bone = skin.envelope_bones[src * stride + j];
+
+		if (bone == ~0u)
+			break;
+
+		float smin = skin.envelope_min[src * stride + j];
+		float smax = skin.envelope_max[src * stride + j];
+
+		for (size_t i = 0; i < stride; ++i)
+		{
+			unsigned int dbone = skin.envelope_bones[dst * stride + i];
+
+			if (dbone == bone)
+			{
+				skin.envelope_min[dst * stride + i] = skin.envelope_min[dst * stride + i] < smin ? skin.envelope_min[dst * stride + i] : smin;
+				skin.envelope_max[dst * stride + i] = skin.envelope_max[dst * stride + i] > smax ? skin.envelope_max[dst * stride + i] : smax;
+				break;
+			}
+
+			if (dbone == ~0u)
+			{
+				skin.envelope_bones[dst * stride + i] = bone;
+				skin.envelope_min[dst * stride + i] = smin;
+				skin.envelope_max[dst * stride + i] = smax;
+				break;
+			}
+
+			// no matching bone and no free slot: the merged envelope would exceed the 4-bone capacity
+			if (i + 1 == stride)
+				return false;
+		}
+	}
+
+	return true;
+}
+
+// returns true when the edge between vertices a and b crosses a skinning boundary and must not be collapsed
+// the constraint is symmetric: each bone referenced by either endpoint must be referenced by the other one
+// with a weight that differs by at most bone_weight_limit
+static bool isSkinEdgeLocked(const SkinConstraint* skin, unsigned int a, unsigned int b)
+{
+	if (!skin)
+		return false;
+
+	if (skin->envelope_min)
+	{
+		// transitive check: every bone covered by either vertex's whole origin set must have
+		// overlapping weight envelopes within the limit
+		size_t stride = skin->envelope_stride;
+
+		// a surviving vertex keeps at most 4 bone slots; if the union of the two envelope bone
+		// sets doesn't fit, merging them would drop a bone, so the edge must stay locked
+		size_t union_bones = 0;
+
+		for (size_t i = 0; i < stride && skin->envelope_bones[a * stride + i] != ~0u; ++i)
+		{
+			bool shared = false;
+
+			for (size_t j = 0; j < stride && skin->envelope_bones[b * stride + j] != ~0u; ++j)
+				if (skin->envelope_bones[b * stride + j] == skin->envelope_bones[a * stride + i])
+					shared = true;
+
+			union_bones += shared ? 0 : 1;
+		}
+
+		for (size_t j = 0; j < stride && skin->envelope_bones[b * stride + j] != ~0u; ++j)
+			union_bones++;
+
+		if (union_bones > stride)
+			return true;
+
+		for (size_t i = 0; i < stride; ++i)
+		{
+			unsigned int bone = skin->envelope_bones[a * stride + i];
+
+			if (bone == ~0u)
+				break;
+
+			float amin = skin->envelope_min[a * stride + i];
+			float amax = skin->envelope_max[a * stride + i];
+
+			float bmin = 0.f;
+			float bmax = 0.f;
+
+			for (size_t j = 0; j < stride; ++j)
+			{
+				if (skin->envelope_bones[b * stride + j] == bone)
+				{
+					bmin = skin->envelope_min[b * stride + j];
+					bmax = skin->envelope_max[b * stride + j];
+					break;
+				}
+			}
+
+			// bone absent on the other side, or envelope ranges are more than the limit apart
+			if (bmax == 0.f || amax - bmin > skin->bone_weight_limit || bmax - amin > skin->bone_weight_limit)
+				return true;
+		}
+
+		for (size_t j = 0; j < stride; ++j)
+		{
+			unsigned int bone = skin->envelope_bones[b * stride + j];
+
+			if (bone == ~0u)
+				break;
+
+			float bmin = skin->envelope_min[b * stride + j];
+			float bmax = skin->envelope_max[b * stride + j];
+
+			float amin = 0.f;
+			float amax = 0.f;
+
+			for (size_t i = 0; i < stride; ++i)
+			{
+				if (skin->envelope_bones[a * stride + i] == bone)
+				{
+					amin = skin->envelope_min[a * stride + i];
+					amax = skin->envelope_max[a * stride + i];
+					break;
+				}
+			}
+
+			if (amax == 0.f || bmax - amin > skin->bone_weight_limit || amax - bmin > skin->bone_weight_limit)
+				return true;
+		}
+
+		return false;
+	}
+
+	// fallback for callers that don't maintain envelopes: direct per-vertex comparison
+	const float* wa = skin->vertex_bone_weights + a * 4;
+	const float* wb = skin->vertex_bone_weights + b * 4;
+	const unsigned int* ba = skin->vertex_bone_indices + a * 4;
+	const unsigned int* bb = skin->vertex_bone_indices + b * 4;
+
+	for (int i = 0; i < 4; ++i)
+	{
+		if (wa[i] == 0.f)
+			continue;
+
+		float match = 0.f;
+
+		for (int j = 0; j < 4; ++j)
+		{
+			if (bb[j] == ba[i] && wb[j] != 0.f)
+			{
+				match = wb[j];
+				break;
+			}
+		}
+
+		if (fabsf(wa[i] - match) > skin->bone_weight_limit)
+			return true;
+	}
+
+	for (int j = 0; j < 4; ++j)
+	{
+		if (wb[j] == 0.f)
+			continue;
+
+		float match = 0.f;
+
+		for (int i = 0; i < 4; ++i)
+		{
+			if (ba[i] == bb[j] && wa[i] != 0.f)
+			{
+				match = wa[i];
+				break;
+			}
+		}
+
+		if (fabsf(wb[j] - match) > skin->bone_weight_limit)
+			return true;
+	}
+
+	return false;
+}
+
 static bool hasEdge(const EdgeAdjacency& adjacency, unsigned int a, unsigned int b)
 {
 	unsigned int count = adjacency.offsets[a + 1] - adjacency.offsets[a];
@@ -1350,7 +1553,7 @@ static size_t boundEdgeCollapses(const EdgeAdjacency& adjacency, size_t vertex_c
 	return (index_count - dual_count / 2) + 3;
 }
 
-static size_t pickEdgeCollapses(Collapse* collapses, size_t collapse_capacity, const unsigned int* indices, size_t index_count, const unsigned int* remap, const unsigned char* vertex_kind, const unsigned int* loop, const unsigned int* loopback)
+static size_t pickEdgeCollapses(Collapse* collapses, size_t collapse_capacity, const unsigned int* indices, size_t index_count, const unsigned int* remap, const unsigned char* vertex_kind, const unsigned int* loop, const unsigned int* loopback, const SkinConstraint* skin)
 {
 	size_t collapse_count = 0;
 
@@ -1390,6 +1593,10 @@ static size_t pickEdgeCollapses(Collapse* collapses, size_t collapse_capacity, c
 			if ((k0 == Kind_Border || k0 == Kind_Seam) && k1 != Kind_Manifold && loop[i0] != i1)
 				continue;
 			if ((k1 == Kind_Border || k1 == Kind_Seam) && k0 != Kind_Manifold && loopback[i1] != i0)
+				continue;
+
+			// skinning boundary: collapsing this edge would merge vertices with incompatible bone weights
+			if (isSkinEdgeLocked(skin, remap[i0], remap[i1]))
 				continue;
 
 			// edge can be collapsed in either direction - we will pick the one with minimum error
@@ -2337,7 +2544,7 @@ enum
 	meshopt_SimplifyInternalDebug = 1 << 30
 };
 
-size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
+size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, const meshopt::SkinConstraint* skin, unsigned int* out_vertex_origin, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
 {
 	using namespace meshopt;
 
@@ -2363,6 +2570,76 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 	unsigned int* sparse_remap = NULL;
 	if (options & meshopt_SimplifySparse)
 		sparse_remap = buildSparseRemap(result, index_count, vertex_count, &vertex_count, allocator);
+
+	// skinning constraints are indexed in the dense vertex space; remap the arrays when sparsity is used
+	SkinConstraint skin_local = {};
+	if (skin)
+	{
+		assert(skin->bone_weight_limit >= 0.f && skin->bone_weight_limit <= 1.f);
+
+		skin_local = *skin;
+
+		if (sparse_remap)
+		{
+			float* sparse_weights = allocator.allocate<float>(vertex_count * 4);
+			unsigned int* sparse_indices = allocator.allocate<unsigned int>(vertex_count * 4);
+
+			for (size_t i = 0; i < vertex_count; ++i)
+			{
+				unsigned int ri = sparse_remap[i];
+
+				memcpy(sparse_weights + i * 4, skin->vertex_bone_weights + ri * 4, 4 * sizeof(float));
+				memcpy(sparse_indices + i * 4, skin->vertex_bone_indices + ri * 4, 4 * sizeof(unsigned int));
+			}
+
+			skin_local.vertex_bone_weights = sparse_weights;
+			skin_local.vertex_bone_indices = sparse_indices;
+		}
+
+		skin = &skin_local;
+
+		// every input vertex carries at most 4 bone weights, so its envelope never needs more than
+		// 4 distinct bones; a merge that would exceed this is conservatively treated as a boundary lock
+		const size_t envelope_stride = 4;
+
+		skin_local.envelope_min = allocator.allocate<float>(vertex_count * envelope_stride);
+		skin_local.envelope_max = allocator.allocate<float>(vertex_count * envelope_stride);
+		skin_local.envelope_bones = allocator.allocate<unsigned int>(vertex_count * envelope_stride);
+		skin_local.envelope_stride = envelope_stride;
+
+		for (size_t i = 0; i < vertex_count; ++i)
+		{
+			for (size_t s = 0; s < envelope_stride; ++s)
+			{
+				skin_local.envelope_min[i * envelope_stride + s] = 0.f;
+				skin_local.envelope_max[i * envelope_stride + s] = 0.f;
+				skin_local.envelope_bones[i * envelope_stride + s] = ~0u;
+			}
+
+			int used = 0;
+
+			for (int k = 0; k < 4; ++k)
+			{
+				if (skin_local.vertex_bone_weights[i * 4 + k] == 0.f)
+					continue;
+
+				skin_local.envelope_bones[i * envelope_stride + used] = skin_local.vertex_bone_indices[i * 4 + k];
+				skin_local.envelope_min[i * envelope_stride + used] = skin_local.vertex_bone_weights[i * 4 + k];
+				skin_local.envelope_max[i * envelope_stride + used] = skin_local.vertex_bone_weights[i * 4 + k];
+				used++;
+			}
+		}
+	}
+
+	// track the origin of each vertex across collapse passes so that weight inheritance can be verified
+	unsigned int* vertex_origin = NULL;
+	if (out_vertex_origin)
+	{
+		vertex_origin = allocator.allocate<unsigned int>(vertex_count);
+
+		for (size_t i = 0; i < vertex_count; ++i)
+			vertex_origin[i] = unsigned(i);
+	}
 
 	// build adjacency information
 	EdgeAdjacency adjacency = {};
@@ -2494,7 +2771,7 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 		// note: throughout the simplification process adjacency structure reflects welded topology for result-in-progress
 		updateEdgeAdjacency(adjacency, result, result_count, vertex_count, remap);
 
-		size_t edge_collapse_count = pickEdgeCollapses(edge_collapses, collapse_capacity, result, result_count, remap, vertex_kind, loop, loopback);
+		size_t edge_collapse_count = pickEdgeCollapses(edge_collapses, collapse_capacity, result, result_count, remap, vertex_kind, loop, loopback, skin);
 		assert(edge_collapse_count <= collapse_capacity);
 
 		// no edges can be collapsed any more due to topology restrictions
@@ -2521,6 +2798,33 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 		// no edges can be collapsed any more due to hitting the error limit or triangle collapse limit
 		if (collapses == 0)
 			break;
+
+		// propagate vertex origins through this pass before the index buffer is remapped
+		if (vertex_origin)
+		{
+			// first apply direct moves; chains within one pass are resolved by following the remap afterwards
+			for (size_t i = 0; i < vertex_count; ++i)
+				if (collapse_remap[i] != i)
+					vertex_origin[i] = collapse_remap[i];
+
+			// compress chains so that every moved vertex points directly at the surviving vertex's original
+			for (size_t i = 0; i < vertex_count; ++i)
+			{
+				unsigned int root = follow(vertex_origin, unsigned(i));
+				vertex_origin[i] = vertex_origin[root];
+			}
+		}
+
+		// merge skin envelopes so future passes see the full bone weight set each surviving vertex represents
+		if (skin && skin->envelope_min)
+			for (size_t i = 0; i < vertex_count; ++i)
+				if (collapse_remap[i] != i)
+				{
+					// isSkinEdgeLocked guarantees the merged envelope fits within the 4-bone capacity
+					bool merged = mergeSkinEnvelope(skin_local, collapse_remap[i], unsigned(i));
+					(void)merged;
+					assert(merged);
+				}
 
 		updateQuadrics(collapse_remap, vertex_count, vertex_quadrics, volume_gradients, attribute_quadrics, attribute_gradients, attribute_count, vertex_positions, remap, vertex_error);
 
@@ -2617,6 +2921,28 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 		for (size_t i = 0; i < result_count; ++i)
 			result[i] = sparse_remap[result[i]];
 
+	// output the source vertex each surviving vertex was collapsed onto; ~0u marks vertices absent from the result
+	if (out_vertex_origin)
+	{
+		if (sparse_remap)
+		{
+			// caller's vertex space is the dense one; fill origins via sparse->dense mapping and mark the rest as unused
+			// note: at this point result indices are already back in the dense space, but vertex_origin is still sparse
+			size_t dense_count = sparse_remap[vertex_count - 1] + 1;
+
+			for (size_t i = 0; i < dense_count; ++i)
+				out_vertex_origin[i] = ~0u;
+
+			for (size_t i = 0; i < vertex_count; ++i)
+				out_vertex_origin[sparse_remap[i]] = sparse_remap[vertex_origin[i]];
+		}
+		else
+		{
+			for (size_t i = 0; i < vertex_count; ++i)
+				out_vertex_origin[i] = vertex_origin[i];
+		}
+	}
+
 	// result_error is quadratic; we need to remap it back to linear
 	if (out_result_error)
 		*out_result_error = sqrtf(result_error) * error_scale;
@@ -2628,19 +2954,39 @@ size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, 
 {
 	assert((options & meshopt_SimplifyInternalSolve) == 0); // use meshopt_simplifyWithUpdate instead
 
-	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, NULL, 0, NULL, 0, NULL, target_index_count, target_error, options, out_result_error);
+	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, NULL, 0, NULL, 0, NULL, NULL, NULL, target_index_count, target_error, options, out_result_error);
 }
 
 size_t meshopt_simplifyWithAttributes(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
 {
 	assert((options & meshopt_SimplifyInternalSolve) == 0); // use meshopt_simplifyWithUpdate instead
 
-	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options, out_result_error);
+	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, NULL, NULL, target_index_count, target_error, options, out_result_error);
 }
 
 size_t meshopt_simplifyWithUpdate(unsigned int* indices, size_t index_count, float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
 {
-	return meshopt_simplifyEdge(indices, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options | meshopt_SimplifyInternalSolve, out_result_error);
+	return meshopt_simplifyEdge(indices, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, NULL, NULL, target_index_count, target_error, options | meshopt_SimplifyInternalSolve, out_result_error);
+}
+
+size_t meshopt_simplifySkinned(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_bone_weights, const unsigned int* vertex_bone_indices, float bone_weight_limit, unsigned int* vertex_remap, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
+{
+	using namespace meshopt;
+
+	assert(index_count % 3 == 0);
+	assert(vertex_positions_stride >= 12 && vertex_positions_stride <= 256);
+	assert(vertex_positions_stride % sizeof(float) == 0);
+	assert(target_index_count <= index_count);
+	assert(target_error >= 0);
+	assert(bone_weight_limit >= 0.f && bone_weight_limit <= 1.f);
+	assert((options & meshopt_SimplifyInternalSolve) == 0);
+
+	SkinConstraint skin = {};
+	skin.vertex_bone_weights = vertex_bone_weights;
+	skin.vertex_bone_indices = vertex_bone_indices;
+	skin.bone_weight_limit = bone_weight_limit;
+
+	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, NULL, 0, NULL, 0, NULL, &skin, vertex_remap, target_index_count, target_error, options, out_result_error);
 }
 
 size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const unsigned char* vertex_lock, size_t target_index_count, float target_error, float* out_result_error)
