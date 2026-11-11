@@ -577,6 +577,39 @@ float e = d * (tan(camera_fovy / 2) * 2 / screen_height); // 1px in mesh space
 bool lod_ok = e * lod_factor >= lod_error;
 ```
 
+For continuous LOD, `meshopt_simplifyLOD` generates a complete chain in one call. Level 0 is the original mesh; every subsequent level has a compact index buffer and a `vertex_remap` that maps each vertex to the previous level. Composing these remaps from any level reaches the original vertex without gaps, which can be used to transfer skinning data, attachments, or animated attributes:
+
+```c++
+size_t level_count = 5;
+size_t index_count = indices.size();
+size_t vertex_count = vertices.size();
+
+std::vector<std::vector<unsigned int> > level_indices(level_count, std::vector<unsigned int>(index_count));
+std::vector<std::vector<unsigned int> > level_remap(level_count, std::vector<unsigned int>(vertex_count));
+std::vector<meshopt_LODLevel> levels(level_count);
+
+for (size_t i = 0; i < level_count; ++i)
+{
+    levels[i].indices = &level_indices[i][0];
+    levels[i].vertex_remap = &level_remap[i][0];
+}
+
+size_t targets[level_count] = {index_count, index_count * 3 / 5, index_count * 7 / 20, index_count / 5, index_count / 10};
+float errors[level_count] = {0.f, 0.02f, 0.03f, 0.05f, 0.1f};
+
+meshopt_simplifyLOD(&levels[0], level_count, indices, index_count, &vertices[0].x, vertex_count, sizeof(Vertex),
+    NULL, 0, NULL, 0, NULL, targets, errors, /* options= */ 0);
+```
+
+Each level error uses the same linear quadric metric as `meshopt_simplify` (normalized to mesh extents unless `meshopt_SimplifyErrorAbsolute` is used, and including attributes when they are supplied). The chain clamps each level to be no better than the previous level, so errors are monotonic. `meshopt_simplifyLODSelect` chooses the coarsest level whose error does not exceed a screen-space threshold:
+
+```c++
+float screen_error = d * (tan(camera_fovy / 2) * 2 / screen_height) * lod_factor;
+size_t lod = meshopt_simplifyLODSelect(&levels[0], level_count, screen_error);
+```
+
+Every remap stage is injective over the vertices used by that level. Tracing a level vertex with `source = level_remap[level][source]` repeatedly until level 0 produces a valid original vertex; this is the source vertex to use for animation, skinning, or attachment queries.
+
 When a sequence of LOD meshes is generated that all use the original vertex buffer, care must be taken to order vertices optimally to not penalize mobile GPU architectures that are only capable of transforming a sequential vertex buffer range. It's recommended in this case to first optimize each LOD for vertex cache, then assemble all LODs in one large index buffer starting from the coarsest LOD (the one with fewest triangles), and call `meshopt_optimizeVertexFetch` on the final large index buffer. This will make sure that coarser LODs require a smaller vertex range and are efficient with respect to vertex fetch and transform.
 
 ### Attribute-aware simplification

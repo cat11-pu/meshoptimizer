@@ -55,6 +55,9 @@ The following settings are frequently used to reduce the resulting data size:
 * `-tw`: convert all textures to WebP (requires `EXT_texture_webp`)
 * `-mi`: use mesh instancing when serializing references to the same meshes (requires `EXT_mesh_gpu_instancing`)
 * `-si R`: simplify meshes targeting triangle/point count ratio R (default: 1; R should be between 0 and 1)
+* `-sl N`: emit N LOD levels as primitives in the same glTF mesh, reducing from the original mesh down to ratio `-si` (default: 0; requires `-si R`)
+
+LOD primitives preserve the source material, variants, skinning, and morph data; reduced levels are written with compact vertex buffers and `lodLevel`/`lodError` extras.
 
 The following settings are frequently used to restrict some optimizations:
 

@@ -564,6 +564,43 @@ MESHOPTIMIZER_API size_t meshopt_simplifyWithAttributes(unsigned int* destinatio
 MESHOPTIMIZER_API size_t meshopt_simplifyWithUpdate(unsigned int* indices, size_t index_count, float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, float* vertex_attributes, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* result_error);
 
 /**
+ * Level of detail chain
+ * A LOD level contains a compact index buffer and a mapping from each vertex in this level to the previous level.
+ * Level 0 is the input mesh, uses the original vertex domain (indices are copied verbatim) and has an identity remap.
+ * Subsequent levels use compact indices in [0, vertex_count), and vertex_remap[v] refers to a vertex in the previous level.
+ * Composing vertex_remap across all levels maps any level vertex back to the original mesh without breaking the chain.
+ *
+ * Error is the same linear quadric error as returned by meshopt_simplify, relative to mesh extents unless meshopt_SimplifyErrorAbsolute is used.
+ * Level errors are monotonic: every level has error >= the previous level. Selection should use meshopt_simplifyLODSelect.
+ *
+ * The caller provides storage for each level: indices must have capacity for index_count, vertex_remap must have capacity for vertex_count.
+ * level_target_index_counts and level_errors must have level_count entries; entry 0 and level_errors[0] are ignored.
+ * level_errors may be NULL to disable the error limit (equivalent to FLT_MAX for every level).
+ * meshopt_SimplifySparse is ignored because LOD remapping requires the dense input vertex domain.
+ * Level 0 is always emitted as the input mesh and returns index_count/vertex_count unchanged.
+ *
+ * Returns the number of levels written (equal to level_count), or 0 if the input is invalid.
+ */
+struct meshopt_LODLevel
+{
+	unsigned int* indices;
+	unsigned int* vertex_remap;
+
+	size_t index_count;
+	size_t vertex_count;
+	float error;
+};
+
+MESHOPTIMIZER_API size_t meshopt_simplifyLOD(struct meshopt_LODLevel* levels, size_t level_count, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, const size_t* level_target_index_counts, const float* level_errors, unsigned int options);
+
+/**
+ * Selects the coarsest LOD level whose error does not exceed target_error.
+ * This can be used with a screen-space error threshold derived from projected edge length/pixel size.
+ * Returns 0 for an empty chain or when the threshold is below the first level error.
+ */
+MESHOPTIMIZER_API size_t meshopt_simplifyLODSelect(const struct meshopt_LODLevel* levels, size_t level_count, float target_error);
+
+/**
  * Mesh simplifier (sloppy)
  * Reduces the number of triangles in the mesh, sacrificing mesh appearance for simplification performance
  * The algorithm doesn't preserve mesh topology but can stop short of the target goal based on target error.

@@ -2337,7 +2337,7 @@ enum
 	meshopt_SimplifyInternalDebug = 1 << 30
 };
 
-size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
+size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error, unsigned int* out_vertex_remap)
 {
 	using namespace meshopt;
 
@@ -2352,6 +2352,10 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 	for (size_t i = 0; i < attribute_count; ++i)
 		assert(attribute_weights[i] >= 0);
 
+	// Sparse simplification changes the vertex domain; remapping is only defined for the dense input domain.
+	if (out_vertex_remap)
+		options &= ~meshopt_SimplifySparse;
+
 	meshopt_Allocator allocator;
 
 	unsigned int* result = destination;
@@ -2363,6 +2367,14 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 	unsigned int* sparse_remap = NULL;
 	if (options & meshopt_SimplifySparse)
 		sparse_remap = buildSparseRemap(result, index_count, vertex_count, &vertex_count, allocator);
+
+	unsigned int* vertex_remap = NULL;
+	if (out_vertex_remap)
+	{
+		vertex_remap = allocator.allocate<unsigned int>(vertex_count);
+		for (size_t i = 0; i < vertex_count; ++i)
+			vertex_remap[i] = unsigned(i);
+	}
 
 	// build adjacency information
 	EdgeAdjacency adjacency = {};
@@ -2522,6 +2534,10 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 		if (collapses == 0)
 			break;
 
+		if (vertex_remap)
+			for (size_t i = 0; i < vertex_count; ++i)
+				vertex_remap[i] = collapse_remap[vertex_remap[i]];
+
 		updateQuadrics(collapse_remap, vertex_count, vertex_quadrics, volume_gradients, attribute_quadrics, attribute_gradients, attribute_count, vertex_positions, remap, vertex_error);
 
 		// updateQuadrics will update vertex error if we use attributes, but if we don't then result_error and vertex_error are equivalent
@@ -2621,6 +2637,10 @@ size_t meshopt_simplifyEdge(unsigned int* destination, const unsigned int* indic
 	if (out_result_error)
 		*out_result_error = sqrtf(result_error) * error_scale;
 
+	if (out_vertex_remap)
+		for (size_t i = 0; i < vertex_count; ++i)
+			out_vertex_remap[i] = vertex_remap[i];
+
 	return result_count;
 }
 
@@ -2628,19 +2648,155 @@ size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, 
 {
 	assert((options & meshopt_SimplifyInternalSolve) == 0); // use meshopt_simplifyWithUpdate instead
 
-	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, NULL, 0, NULL, 0, NULL, target_index_count, target_error, options, out_result_error);
+	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, NULL, 0, NULL, 0, NULL, target_index_count, target_error, options, out_result_error, NULL);
 }
 
 size_t meshopt_simplifyWithAttributes(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
 {
 	assert((options & meshopt_SimplifyInternalSolve) == 0); // use meshopt_simplifyWithUpdate instead
 
-	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options, out_result_error);
+	return meshopt_simplifyEdge(destination, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options, out_result_error, NULL);
 }
 
 size_t meshopt_simplifyWithUpdate(unsigned int* indices, size_t index_count, float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* out_result_error)
 {
-	return meshopt_simplifyEdge(indices, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options | meshopt_SimplifyInternalSolve, out_result_error);
+	return meshopt_simplifyEdge(indices, indices, index_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_index_count, target_error, options | meshopt_SimplifyInternalSolve, out_result_error, NULL);
+}
+
+size_t meshopt_simplifyLOD(struct meshopt_LODLevel* levels, size_t level_count, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes_data, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, const size_t* level_target_index_counts, const float* level_errors, unsigned int options)
+{
+	using namespace meshopt;
+
+	assert(levels || level_count == 0);
+	assert(index_count % 3 == 0);
+	assert(vertex_positions_stride >= 12 && vertex_positions_stride <= 256);
+	assert(vertex_positions_stride % sizeof(float) == 0);
+	assert(vertex_attributes_stride >= attribute_count * sizeof(float) && vertex_attributes_stride <= 256);
+	assert(vertex_attributes_stride % sizeof(float) == 0);
+	assert(attribute_count <= kMaxAttributes);
+	assert(level_target_index_counts || level_count == 0);
+
+	// the chain needs the dense vertex domain to build stable remaps
+	options &= ~meshopt_SimplifySparse;
+
+	if (level_count == 0)
+		return 0;
+
+	if (!levels || (index_count && !indices) || !level_target_index_counts)
+		return 0;
+
+	for (size_t i = 0; i < level_count; ++i)
+		assert((index_count == 0 || levels[i].indices) && (vertex_count == 0 || levels[i].vertex_remap));
+	for (size_t i = 0; i < level_count; ++i)
+		if ((index_count && !levels[i].indices) || (vertex_count && !levels[i].vertex_remap))
+			return 0;
+
+	meshopt_Allocator allocator;
+
+	unsigned int* prev_indices = allocator.allocate<unsigned int>(index_count);
+	unsigned int* next_indices = allocator.allocate<unsigned int>(index_count);
+	unsigned int* stage_remap = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* prev_compact = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* next_compact = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* next_sources = allocator.allocate<unsigned int>(vertex_count);
+
+	if (index_count)
+		memcpy(prev_indices, indices, index_count * sizeof(unsigned int));
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		prev_compact[i] = unsigned(i);
+
+	// level 0 is the original mesh and acts as the root of the remap chain
+	if (index_count && levels[0].indices != indices)
+		memcpy(levels[0].indices, indices, index_count * sizeof(unsigned int));
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		levels[0].vertex_remap[i] = unsigned(i);
+
+	levels[0].index_count = index_count;
+	levels[0].vertex_count = vertex_count;
+	levels[0].error = 0.f;
+
+	size_t prev_count = index_count;
+	float prev_error = 0.f;
+
+	for (size_t level = 1; level < level_count; ++level)
+	{
+		size_t target_count = level_target_index_counts[level];
+		assert(target_count <= index_count);
+
+		target_count = target_count < prev_count ? target_count : prev_count;
+		target_count -= target_count % 3;
+
+		float target_error = level_errors ? level_errors[level] : FLT_MAX;
+		target_error = target_error > prev_error ? target_error : prev_error;
+
+		float level_error = 0.f;
+		size_t result_count = meshopt_simplifyEdge(next_indices, prev_indices, prev_count, vertex_positions_data, vertex_count, vertex_positions_stride, vertex_attributes_data, vertex_attributes_stride, attribute_weights, attribute_count, vertex_lock, target_count, target_error, options, &level_error, stage_remap);
+
+		// build a compact vertex buffer for this level, using the remap to identify surviving vertices
+		memset(next_compact, -1, vertex_count * sizeof(unsigned int));
+		size_t next_vertex_count = 0;
+
+		for (size_t i = 0; i < result_count; ++i)
+		{
+			unsigned int v = next_indices[i];
+			assert(v < vertex_count);
+
+			if (next_compact[v] == ~0u)
+			{
+				next_compact[v] = unsigned(next_vertex_count);
+				next_sources[next_vertex_count] = v;
+				next_vertex_count++;
+			}
+		}
+
+		for (size_t i = 0; i < result_count; ++i)
+		{
+			unsigned int v = next_indices[i];
+			levels[level].indices[i] = next_compact[v];
+		}
+
+		for (size_t i = 0; i < next_vertex_count; ++i)
+		{
+			unsigned int v = next_sources[i];
+			unsigned int prev = prev_compact[v];
+
+			assert(prev != ~0u && prev < levels[level - 1].vertex_count);
+			levels[level].vertex_remap[i] = prev;
+		}
+
+		levels[level].index_count = result_count;
+		levels[level].vertex_count = next_vertex_count;
+		levels[level].error = level_error > prev_error ? level_error : prev_error;
+
+		prev_count = result_count;
+		prev_error = levels[level].error;
+
+		unsigned int* index_swap = prev_indices;
+		prev_indices = next_indices;
+		next_indices = index_swap;
+
+		unsigned int* compact_swap = prev_compact;
+		prev_compact = next_compact;
+		next_compact = compact_swap;
+	}
+
+	return level_count;
+}
+
+size_t meshopt_simplifyLODSelect(const struct meshopt_LODLevel* levels, size_t level_count, float target_error)
+{
+	size_t result = 0;
+
+	if (!levels || level_count == 0)
+		return 0;
+
+	for (size_t i = 0; i < level_count; ++i)
+		if (levels[i].error <= target_error)
+			result = i;
+
+	return result;
 }
 
 size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, const unsigned char* vertex_lock, size_t target_index_count, float target_error, float* out_result_error)

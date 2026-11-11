@@ -45,6 +45,13 @@ struct Instance
 	float color[4];
 };
 
+struct MeshLOD
+{
+	std::vector<Stream> streams;
+	std::vector<unsigned int> indices;
+	float error;
+};
+
 struct Mesh
 {
 	int scene;
@@ -60,6 +67,7 @@ struct Mesh
 
 	std::vector<Stream> streams;
 	std::vector<unsigned int> indices;
+	std::vector<MeshLOD> lods;
 
 	bool geometry_duplicate;
 	uint64_t geometry_hash[2];
@@ -152,6 +160,7 @@ struct Settings
 
 	float simplify_ratio;
 	float simplify_error;
+	int simplify_lod;
 	bool simplify_aggressive;
 	bool simplify_lock_borders;
 	bool simplify_permissive;
@@ -409,6 +418,7 @@ void writeTexture(std::string& json, const cgltf_texture& texture, const ImageIn
 void writeMeshAttributes(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings);
 size_t writeMeshIndices(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<unsigned int>& indices, cgltf_primitive_type type, const Settings& settings);
 void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings);
+void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, const std::vector<Stream>& streams, const std::vector<unsigned int>& indices, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings);
 size_t writeJointBindMatrices(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const cgltf_skin& skin, const QuantizationPosition& qp, const Settings& settings);
 size_t writeInstances(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<Instance>& instances, const QuantizationPosition& qp, bool has_color, const Settings& settings);
 void writeMeshNode(std::string& json, size_t mesh_offset, cgltf_node* node, cgltf_skin* skin, cgltf_data* data, const QuantizationPosition* qp);

@@ -1039,7 +1039,7 @@ static void writePrimitiveAttribute(std::string& json, const Stream& stream, siz
 	append(json, accessor);
 }
 
-static void writeMeshAttributesInterleaved(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
+static void writeMeshAttributesInterleaved(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<Stream>& streams, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
 {
 	struct Attribute
 	{
@@ -1051,9 +1051,9 @@ static void writeMeshAttributesInterleaved(std::string& json, std::vector<Buffer
 	std::vector<Attribute> attributes;
 	size_t stride = 0;
 
-	for (size_t j = 0; j < mesh.streams.size(); ++j)
+	for (size_t j = 0; j < streams.size(); ++j)
 	{
-		const Stream& stream = mesh.streams[j];
+		const Stream& stream = streams[j];
 
 		if (stream.target != target)
 			continue;
@@ -1070,7 +1070,7 @@ static void writeMeshAttributesInterleaved(std::string& json, std::vector<Buffer
 	size_t view = getBufferView(views, BufferView::Kind_Vertex, StreamFormat::Filter_None, compression, stride, 0);
 	size_t offset = views[view].data.size();
 
-	size_t vertex_count = mesh.streams[0].data.size();
+	size_t vertex_count = streams[0].data.size();
 
 	views[view].data.resize(views[view].data.size() + stride * vertex_count);
 
@@ -1097,16 +1097,16 @@ static void writeMeshAttributesInterleaved(std::string& json, std::vector<Buffer
 	}
 }
 
-void writeMeshAttributes(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
+static void writeMeshAttributesStreams(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<Stream>& streams, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
 {
 	if (settings.mesh_interleaved)
-		return writeMeshAttributesInterleaved(json, views, json_accessors, accr_offset, mesh, target, qp, qt, settings);
+		return writeMeshAttributesInterleaved(json, views, json_accessors, accr_offset, streams, target, qp, qt, settings);
 
 	std::string scratch;
 
-	for (size_t j = 0; j < mesh.streams.size(); ++j)
+	for (size_t j = 0; j < streams.size(); ++j)
 	{
-		const Stream& stream = mesh.streams[j];
+		const Stream& stream = streams[j];
 
 		if (stream.target != target)
 			continue;
@@ -1126,6 +1126,11 @@ void writeMeshAttributes(std::string& json, std::vector<BufferView>& views, std:
 	}
 }
 
+void writeMeshAttributes(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, int target, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
+{
+	writeMeshAttributesStreams(json, views, json_accessors, accr_offset, mesh.streams, target, qp, qt, settings);
+}
+
 size_t writeMeshIndices(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<unsigned int>& indices, cgltf_primitive_type type, const Settings& settings)
 {
 	std::string scratch;
@@ -1143,10 +1148,10 @@ size_t writeMeshIndices(std::vector<BufferView>& views, std::string& json_access
 	return index_accr;
 }
 
-void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
+void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, const std::vector<Stream>& streams, const std::vector<unsigned int>& indices, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
 {
 	append(json, "{\"attributes\":{");
-	writeMeshAttributes(json, views, json_accessors, accr_offset, mesh, 0, qp, qt, settings);
+	writeMeshAttributesStreams(json, views, json_accessors, accr_offset, streams, 0, qp, qt, settings);
 	append(json, "}");
 	if (mesh.type != cgltf_primitive_type_triangles)
 	{
@@ -1160,19 +1165,24 @@ void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::s
 		{
 			comma(json);
 			append(json, "{");
-			writeMeshAttributes(json, views, json_accessors, accr_offset, mesh, int(1 + j), qp, qt, settings);
+			writeMeshAttributesStreams(json, views, json_accessors, accr_offset, streams, int(1 + j), qp, qt, settings);
 			append(json, "}");
 		}
 		append(json, "]");
 	}
 
-	if (!mesh.indices.empty())
+	if (!indices.empty())
 	{
-		size_t index_accr = writeMeshIndices(views, json_accessors, accr_offset, mesh.indices, mesh.type, settings);
+		size_t index_accr = writeMeshIndices(views, json_accessors, accr_offset, indices, mesh.type, settings);
 
 		append(json, ",\"indices\":");
 		append(json, index_accr);
 	}
+}
+
+void writeMeshGeometry(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Mesh& mesh, const QuantizationPosition& qp, const QuantizationTexture& qt, const Settings& settings)
+{
+	writeMeshGeometry(json, views, json_accessors, accr_offset, mesh, mesh.streams, mesh.indices, qp, qt, settings);
 }
 
 static size_t writeAnimationTime(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const std::vector<float>& time, const Settings& settings)

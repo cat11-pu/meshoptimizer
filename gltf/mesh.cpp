@@ -1133,6 +1133,139 @@ static void simplifyMesh(Mesh& mesh, float threshold, float error, bool aggressi
 		meshopt_remapIndexBuffer(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), &uvremap[0]);
 }
 
+static void simplifyMeshLOD(Mesh& mesh, int level_count, float threshold, float error, bool lock_borders, bool permissive)
+{
+	assert(mesh.type == cgltf_primitive_type_triangles);
+
+	if (mesh.indices.empty())
+		return;
+
+	Stream* positions = getStream(mesh, cgltf_attribute_type_position);
+	if (!positions)
+		return;
+
+	size_t presplit_vertices = positions->data.size();
+
+	std::vector<unsigned int> uvremap;
+	simplifyUvSplit(mesh, uvremap);
+
+	size_t vertex_count = positions->data.size();
+	size_t index_count = mesh.indices.size();
+
+	unsigned int options = 0;
+	if (lock_borders)
+		options |= meshopt_SimplifyLockBorder;
+	else
+		options |= meshopt_SimplifyPrune;
+
+	if (permissive)
+		options |= meshopt_SimplifyPermissive;
+
+	if (mesh.targets || getStream(mesh, cgltf_attribute_type_weights))
+		options |= meshopt_SimplifyRegularize;
+
+	float attrw[8] = {};
+	std::vector<float> attrs;
+	simplifyAttributes(attrs, attrw, sizeof(attrw) / sizeof(attrw[0]), mesh, 0.f);
+
+	std::vector<unsigned char> locks;
+	if (permissive)
+		simplifyProtect(locks, mesh, presplit_vertices);
+
+	std::vector<size_t> target_counts(level_count);
+	std::vector<float> level_errors(level_count);
+
+	for (int i = 0; i < level_count; ++i)
+	{
+		double ratio = i == 0 ? 1.0 : pow(double(threshold), double(i) / double(level_count - 1));
+		target_counts[i] = size_t(double(index_count / 3) * ratio) * 3;
+		level_errors[i] = i == 0 ? 0.f : error;
+	}
+
+	std::vector<std::vector<unsigned int> > level_indices(level_count, std::vector<unsigned int>(index_count));
+	std::vector<std::vector<unsigned int> > level_remap(level_count, std::vector<unsigned int>(vertex_count));
+	std::vector<meshopt_LODLevel> levels(level_count);
+
+	for (int i = 0; i < level_count; ++i)
+	{
+		levels[i].indices = &level_indices[i][0];
+		levels[i].vertex_remap = &level_remap[i][0];
+	}
+
+	size_t result_levels = meshopt_simplifyLOD(&levels[0], level_count, &mesh.indices[0], index_count, positions->data[0].f, vertex_count, sizeof(Attr),
+	    attrs.data(), sizeof(attrw), attrw, sizeof(attrw) / sizeof(attrw[0]), permissive ? locks.data() : NULL, target_counts.data(), level_errors.data(), options);
+
+	if (result_levels == 0)
+		return;
+
+	mesh.indices.resize(levels[0].index_count);
+	mesh.lods.resize(result_levels - 1);
+
+	for (size_t level = 1; level < result_levels; ++level)
+	{
+		MeshLOD& lod = mesh.lods[level - 1];
+
+		lod.indices.assign(level_indices[level].begin(), level_indices[level].begin() + levels[level].index_count);
+		lod.error = levels[level].error;
+		lod.streams.resize(mesh.streams.size());
+
+		for (size_t stream = 0; stream < mesh.streams.size(); ++stream)
+		{
+			Stream& target = lod.streams[stream];
+			const Stream& source = mesh.streams[stream];
+
+			target.type = source.type;
+			target.index = source.index;
+			target.target = source.target;
+			target.custom_name = source.custom_name;
+			target.data.resize(levels[level].vertex_count);
+		}
+
+		for (size_t vertex = 0; vertex < levels[level].vertex_count; ++vertex)
+		{
+			unsigned int source_vertex = unsigned(vertex);
+
+			for (size_t reverse = level; reverse > 0; --reverse)
+			{
+				assert(source_vertex < levels[reverse].vertex_count);
+				source_vertex = levels[reverse].vertex_remap[source_vertex];
+			}
+
+			assert(source_vertex < vertex_count);
+
+			for (size_t stream = 0; stream < mesh.streams.size(); ++stream)
+				lod.streams[stream].data[vertex] = mesh.streams[stream].data[source_vertex];
+		}
+	}
+}
+
+static void optimizeMeshStreams(std::vector<Stream>& streams, std::vector<unsigned int>& indices, bool compressmore)
+{
+	if (indices.empty())
+		return;
+
+	size_t vertex_count = streams[0].data.size();
+
+	if (compressmore)
+		meshopt_optimizeVertexCacheStrip(&indices[0], &indices[0], indices.size(), vertex_count);
+	else
+		meshopt_optimizeVertexCache(&indices[0], &indices[0], indices.size(), vertex_count);
+
+	std::vector<unsigned int> remap(vertex_count);
+	size_t unique_vertices = meshopt_optimizeVertexFetchRemap(&remap[0], &indices[0], indices.size(), vertex_count);
+	assert(unique_vertices <= vertex_count);
+
+	meshopt_remapIndexBuffer(&indices[0], &indices[0], indices.size(), &remap[0]);
+
+	for (size_t i = 0; i < streams.size(); ++i)
+	{
+		assert(streams[i].data.size() == vertex_count);
+
+		meshopt_remapVertexBuffer(&streams[i].data[0], &streams[i].data[0], vertex_count, sizeof(Attr), &remap[0]);
+		streams[i].data.resize(unique_vertices);
+	}
+}
+
 static void optimizeMesh(Mesh& mesh, bool compressmore)
 {
 	assert(mesh.type == cgltf_primitive_type_triangles);
@@ -1140,26 +1273,10 @@ static void optimizeMesh(Mesh& mesh, bool compressmore)
 	if (mesh.indices.empty())
 		return;
 
-	size_t vertex_count = mesh.streams[0].data.size();
+	optimizeMeshStreams(mesh.streams, mesh.indices, compressmore);
 
-	if (compressmore)
-		meshopt_optimizeVertexCacheStrip(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), vertex_count);
-	else
-		meshopt_optimizeVertexCache(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), vertex_count);
-
-	std::vector<unsigned int> remap(vertex_count);
-	size_t unique_vertices = meshopt_optimizeVertexFetchRemap(&remap[0], &mesh.indices[0], mesh.indices.size(), vertex_count);
-	assert(unique_vertices <= vertex_count);
-
-	meshopt_remapIndexBuffer(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), &remap[0]);
-
-	for (size_t i = 0; i < mesh.streams.size(); ++i)
-	{
-		assert(mesh.streams[i].data.size() == vertex_count);
-
-		meshopt_remapVertexBuffer(&mesh.streams[i].data[0], &mesh.streams[i].data[0], vertex_count, sizeof(Attr), &remap[0]);
-		mesh.streams[i].data.resize(unique_vertices);
-	}
+	for (size_t i = 0; i < mesh.lods.size(); ++i)
+		optimizeMeshStreams(mesh.lods[i].streams, mesh.lods[i].indices, compressmore);
 }
 
 struct BoneInfluence
@@ -1339,7 +1456,11 @@ void processMesh(Mesh& mesh, const Settings& settings)
 		reindexMesh(mesh, settings);
 		filterTriangles(mesh);
 
-		if (settings.simplify_ratio < 1)
+		if (settings.simplify_lod >= 2)
+		{
+			simplifyMeshLOD(mesh, settings.simplify_lod, settings.simplify_ratio, settings.simplify_error / mesh.quality, settings.simplify_lock_borders, settings.simplify_permissive);
+		}
+		else if (settings.simplify_ratio < 1)
 		{
 			simplifyMesh(mesh, settings.simplify_ratio, settings.simplify_error / mesh.quality, settings.simplify_aggressive, settings.simplify_lock_borders, settings.simplify_permissive, settings.simplify_update);
 		}

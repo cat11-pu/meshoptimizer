@@ -1,6 +1,7 @@
 #include "../src/meshoptimizer.h"
 
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2691,6 +2692,237 @@ static void simplifyFolds()
 	assert(memcmp(result, expected, sizeof(expected)) == 0);
 }
 
+struct LODTestMesh
+{
+	std::vector<float> positions;
+	std::vector<unsigned int> indices;
+};
+
+static LODTestMesh makeLODGrid()
+{
+	const int size = 21;
+	LODTestMesh mesh;
+
+	for (int y = 0; y < size; ++y)
+		for (int x = 0; x < size; ++x)
+		{
+			float px = (float(x) / float(size - 1) - 0.5f) * 2.f;
+			float pz = (float(y) / float(size - 1) - 0.5f) * 2.f;
+			float py = 0.25f * sinf(px * 3.f) * cosf(pz * 3.f);
+
+			mesh.positions.push_back(px);
+			mesh.positions.push_back(py);
+			mesh.positions.push_back(pz);
+		}
+
+	for (int y = 0; y + 1 < size; ++y)
+		for (int x = 0; x + 1 < size; ++x)
+		{
+			unsigned int a = unsigned(y * size + x);
+			unsigned int b = unsigned(y * size + x + 1);
+			unsigned int c = unsigned((y + 1) * size + x);
+			unsigned int d = unsigned((y + 1) * size + x + 1);
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+
+	return mesh;
+}
+
+static LODTestMesh makeLODTorus()
+{
+	const int major = 24;
+	const int minor = 12;
+	const float major_radius = 1.f;
+	const float minor_radius = 0.35f;
+
+	LODTestMesh mesh;
+
+	for (int i = 0; i < major; ++i)
+		for (int j = 0; j < minor; ++j)
+		{
+			float u = float(i) * 2.f * 3.1415926f / float(major);
+			float v = float(j) * 2.f * 3.1415926f / float(minor);
+			float r = major_radius + minor_radius * cosf(v);
+
+			mesh.positions.push_back(r * cosf(u));
+			mesh.positions.push_back(minor_radius * sinf(v));
+			mesh.positions.push_back(r * sinf(u));
+		}
+
+	for (int i = 0; i < major; ++i)
+		for (int j = 0; j < minor; ++j)
+		{
+			unsigned int a = unsigned(i * minor + j);
+			unsigned int b = unsigned(((i + 1) % major) * minor + j);
+			unsigned int c = unsigned(i * minor + (j + 1) % minor);
+			unsigned int d = unsigned(((i + 1) % major) * minor + (j + 1) % minor);
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(d);
+			mesh.indices.push_back(c);
+		}
+
+	return mesh;
+}
+
+static LODTestMesh makeLODSphere()
+{
+	const int stacks = 16;
+	const int segments = 24;
+
+	LODTestMesh mesh;
+
+	mesh.positions.push_back(0.f);
+	mesh.positions.push_back(1.f);
+	mesh.positions.push_back(0.f);
+
+	mesh.positions.push_back(0.f);
+	mesh.positions.push_back(-1.f);
+	mesh.positions.push_back(0.f);
+
+	for (int i = 1; i < stacks; ++i)
+	{
+		float theta = float(i) * 3.1415926f / float(stacks);
+		float y = cosf(theta);
+		float r = sinf(theta);
+
+		for (int j = 0; j < segments; ++j)
+		{
+			float phi = float(j) * 2.f * 3.1415926f / float(segments);
+
+			mesh.positions.push_back(r * cosf(phi));
+			mesh.positions.push_back(y);
+			mesh.positions.push_back(r * sinf(phi));
+		}
+	}
+
+	for (int j = 0; j < segments; ++j)
+	{
+		unsigned int a = unsigned(2 + j);
+		unsigned int b = unsigned(2 + (j + 1) % segments);
+
+		mesh.indices.push_back(0);
+		mesh.indices.push_back(a);
+		mesh.indices.push_back(b);
+	}
+
+	for (int i = 1; i + 1 < stacks; ++i)
+		for (int j = 0; j < segments; ++j)
+		{
+			unsigned int a = unsigned(2 + (i - 1) * segments + j);
+			unsigned int b = unsigned(2 + (i - 1) * segments + (j + 1) % segments);
+			unsigned int c = unsigned(2 + i * segments + j);
+			unsigned int d = unsigned(2 + i * segments + (j + 1) % segments);
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+
+	int last = 2 + (stacks - 2) * segments;
+
+	for (int j = 0; j < segments; ++j)
+	{
+		unsigned int a = unsigned(last + j);
+		unsigned int b = unsigned(last + (j + 1) % segments);
+
+		mesh.indices.push_back(1);
+		mesh.indices.push_back(b);
+		mesh.indices.push_back(a);
+	}
+
+	return mesh;
+}
+
+static void checkLODChain(const LODTestMesh& mesh)
+{
+	const size_t level_count = 5;
+	size_t index_count = mesh.indices.size();
+	size_t vertex_count = mesh.positions.size() / 3;
+
+	std::vector<std::vector<unsigned int> > level_indices(level_count, std::vector<unsigned int>(index_count));
+	std::vector<std::vector<unsigned int> > level_remap(level_count, std::vector<unsigned int>(vertex_count));
+	std::vector<meshopt_LODLevel> levels(level_count);
+
+	for (size_t i = 0; i < level_count; ++i)
+	{
+		levels[i].indices = &level_indices[i][0];
+		levels[i].vertex_remap = &level_remap[i][0];
+	}
+
+	size_t targets[level_count] = {index_count, index_count * 3 / 5, index_count * 7 / 20, index_count / 5, index_count / 10};
+	float errors[level_count] = {0.f, 0.02f, 0.03f, 0.05f, 0.1f};
+
+	size_t result = meshopt_simplifyLOD(&levels[0], level_count, &mesh.indices[0], index_count, &mesh.positions[0], vertex_count, sizeof(float) * 3, NULL, 0, NULL, 0, NULL, targets, errors, 0);
+	assert(result == level_count);
+	assert(levels[0].index_count == index_count);
+	assert(levels[0].vertex_count == vertex_count);
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		assert(levels[0].vertex_remap[i] == i);
+
+	for (size_t i = 1; i < level_count; ++i)
+	{
+		assert(levels[i].error >= levels[i - 1].error);
+		assert(levels[i].index_count <= levels[i - 1].index_count);
+		assert(levels[i].index_count % 3 == 0);
+
+		for (size_t j = 0; j < levels[i].index_count; ++j)
+			assert(levels[i].indices[j] < levels[i].vertex_count);
+
+		std::vector<unsigned char> used(levels[i - 1].vertex_count);
+
+		for (size_t j = 0; j < levels[i].vertex_count; ++j)
+		{
+			unsigned int prev = levels[i].vertex_remap[j];
+			assert(prev < levels[i - 1].vertex_count);
+			assert(used[prev] == 0);
+			used[prev] = 1;
+
+			unsigned int source = unsigned(j);
+			for (size_t l = i; l > 0; --l)
+			{
+				assert(source < levels[l].vertex_count);
+				source = levels[l].vertex_remap[source];
+			}
+
+			assert(source < vertex_count);
+		}
+	}
+
+	assert(levels[level_count - 1].index_count < index_count);
+
+	assert(meshopt_simplifyLODSelect(&levels[0], level_count, -1.f) == 0);
+	assert(meshopt_simplifyLODSelect(&levels[0], level_count, FLT_MAX) == level_count - 1);
+
+	size_t last = 0;
+	for (size_t i = 0; i < level_count; ++i)
+	{
+		size_t selected = meshopt_simplifyLODSelect(&levels[0], level_count, levels[i].error);
+		assert(selected >= last);
+		last = selected;
+	}
+}
+
+static void simplifyLODChain()
+{
+	checkLODChain(makeLODGrid());
+	checkLODChain(makeLODTorus());
+	checkLODChain(makeLODSphere());
+}
+
 static void filterTriangles()
 {
 	// v0/v3 match fully; v0/v4 match on prefix only
@@ -3681,6 +3913,7 @@ void runTests()
 	simplifyUpdateLocked(0);
 	simplifyUpdateLocked(meshopt_SimplifySparse);
 	simplifyFolds();
+	simplifyLODChain();
 
 	filterTriangles();
 	adjacency();

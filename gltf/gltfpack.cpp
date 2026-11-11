@@ -16,6 +16,8 @@
 
 #include "../src/meshoptimizer.h"
 
+static void writePrimitiveMetadata(std::string& json_meshes, const Mesh& prim, const std::vector<MaterialInfo>& materials, cgltf_data* data, const Settings& settings, int lod_level, float lod_error);
+
 std::string getVersion()
 {
 	char result[32];
@@ -80,6 +82,7 @@ static void printMeshStats(const std::vector<Mesh>& meshes, const char* name)
 {
 	size_t mesh_triangles = 0;
 	size_t mesh_vertices = 0;
+	size_t mesh_primitives = 0;
 	size_t total_triangles = 0;
 	size_t total_instances = 0;
 	size_t total_draws = 0;
@@ -89,25 +92,37 @@ static void printMeshStats(const std::vector<Mesh>& meshes, const char* name)
 		const Mesh& mesh = meshes[i];
 
 		size_t triangles = mesh.type == cgltf_primitive_type_triangles ? mesh.indices.size() / 3 : 0;
+		size_t vertices = mesh.streams.empty() ? 0 : mesh.streams[0].data.size();
+		size_t lods = mesh.lods.size();
+
+		for (size_t j = 0; j < mesh.lods.size(); ++j)
+		{
+			const MeshLOD& lod = mesh.lods[j];
+
+			triangles += lod.indices.size() / 3;
+			vertices += lod.streams.empty() ? 0 : lod.streams[0].data.size();
+		}
 
 		mesh_triangles += triangles;
-		mesh_vertices += mesh.streams.empty() ? 0 : mesh.streams[0].data.size();
+		mesh_vertices += vertices;
+		mesh_primitives += 1 + lods;
 
 		size_t instances = std::max(size_t(1), mesh.nodes.size() + mesh.instances.size());
 
 		total_triangles += triangles * instances;
 		total_instances += instances;
-		total_draws += std::max(size_t(1), mesh.nodes.size());
+		total_draws += (1 + lods) * std::max(size_t(1), mesh.nodes.size());
 	}
 
 	printf("%s: %d mesh primitives (%d triangles, %d vertices); %d draw calls (%d instances, %lld triangles)\n", name,
-	    int(meshes.size()), int(mesh_triangles), int(mesh_vertices),
+	    int(mesh_primitives), int(mesh_triangles), int(mesh_vertices),
 	    int(total_draws), int(total_instances), (long long)total_triangles);
 }
 
 static void printSceneStats(const std::vector<BufferView>& views, const std::vector<Mesh>& meshes, size_t node_offset, size_t mesh_offset, size_t material_offset, size_t json_size, size_t bin_size)
 {
 	size_t bytes[BufferView::Kind_Count] = {};
+	size_t primitive_count = 0;
 
 	for (size_t i = 0; i < views.size(); ++i)
 	{
@@ -115,7 +130,10 @@ static void printSceneStats(const std::vector<BufferView>& views, const std::vec
 		bytes[view.kind] += view.bytes;
 	}
 
-	printf("output: %d nodes, %d meshes (%d primitives), %d materials\n", int(node_offset), int(mesh_offset), int(meshes.size()), int(material_offset));
+	for (size_t i = 0; i < meshes.size(); ++i)
+		primitive_count += 1 + meshes[i].lods.size();
+
+	printf("output: %d nodes, %d meshes (%d primitives), %d materials\n", int(node_offset), int(mesh_offset), int(primitive_count), int(material_offset));
 	printf("output: JSON %d bytes, buffers %d bytes\n", int(json_size), int(bin_size));
 	printf("output: buffers: vertex %d bytes, index %d bytes, skin %d bytes, time %d bytes, keyframe %d bytes, instance %d bytes, image %d bytes\n",
 	    int(bytes[BufferView::Kind_Vertex]), int(bytes[BufferView::Kind_Index]), int(bytes[BufferView::Kind_Skin]),
@@ -450,7 +468,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	markNeededNodes(data, nodes, meshes, animations, settings);
 	markNeededMaterials(data, materials, meshes, settings);
 
-	if (settings.simplify_ratio < 1)
+	if (settings.simplify_ratio < 1 || settings.simplify_lod >= 2)
 		computeMeshQuality(meshes);
 
 	for (size_t i = 0; i < meshes.size(); ++i)
@@ -654,40 +672,22 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 				writeMeshGeometry(json_meshes, views, json_accessors, accr_offset, prim, qp, qt, settings);
 			}
 
-			if (prim.material)
-			{
-				MaterialInfo& mi = materials[prim.material - data->materials];
-
-				assert(mi.keep);
-				append(json_meshes, ",\"material\":");
-				append(json_meshes, size_t(mi.remap));
-			}
-
-			if (prim.variants.size())
-			{
-				append(json_meshes, ",\"extensions\":{\"KHR_materials_variants\":{\"mappings\":[");
-
-				for (size_t j = 0; j < prim.variants.size(); ++j)
-				{
-					const cgltf_material_mapping& variant = prim.variants[j];
-					MaterialInfo& mi = materials[variant.material - data->materials];
-
-					assert(mi.keep);
-					comma(json_meshes);
-					append(json_meshes, "{\"material\":");
-					append(json_meshes, size_t(mi.remap));
-					append(json_meshes, ",\"variants\":[");
-					append(json_meshes, size_t(variant.variant));
-					append(json_meshes, "]}");
-				}
-
-				append(json_meshes, "]}}");
-			}
-
-			if (settings.keep_extras)
-				writeExtras(json_meshes, prim.extras);
+			writePrimitiveMetadata(json_meshes, prim, materials, data, settings, -1, 0.f);
 
 			append(json_meshes, "}");
+
+			for (size_t l = 0; l < prim.lods.size(); ++l)
+			{
+				const MeshLOD& lod = prim.lods[l];
+
+				comma(json_meshes);
+
+				writeMeshGeometry(json_meshes, views, json_accessors, accr_offset, prim, lod.streams, lod.indices, qp, qt, settings);
+
+				writePrimitiveMetadata(json_meshes, prim, materials, data, settings, int(l + 1), lod.error);
+
+				append(json_meshes, "}");
+			}
 		}
 
 		append(json_meshes, "]");
@@ -1034,6 +1034,59 @@ static std::string getBufferSpec(const char* bin_path, size_t bin_size, const ch
 	return json;
 }
 
+static void writePrimitiveMetadata(std::string& json_meshes, const Mesh& prim, const std::vector<MaterialInfo>& materials, cgltf_data* data, const Settings& settings, int lod_level, float lod_error)
+{
+	if (prim.material)
+	{
+		const MaterialInfo& mi = materials[prim.material - data->materials];
+
+		assert(mi.keep);
+		append(json_meshes, ",\"material\":");
+		append(json_meshes, size_t(mi.remap));
+	}
+
+	if (prim.variants.size())
+	{
+		append(json_meshes, ",\"extensions\":{\"KHR_materials_variants\":{\"mappings\":[");
+
+		for (size_t j = 0; j < prim.variants.size(); ++j)
+		{
+			const cgltf_material_mapping& variant = prim.variants[j];
+			const MaterialInfo& mi = materials[variant.material - data->materials];
+
+			assert(mi.keep);
+			comma(json_meshes);
+			append(json_meshes, "{\"material\":");
+			append(json_meshes, size_t(mi.remap));
+			append(json_meshes, ",\"variants\":[");
+			append(json_meshes, size_t(variant.variant));
+			append(json_meshes, "]}");
+		}
+
+		append(json_meshes, "]}}");
+	}
+
+	if (lod_level >= 0)
+	{
+		append(json_meshes, ",\"extras\":{\"lodLevel\":");
+		append(json_meshes, size_t(lod_level));
+		append(json_meshes, ",\"lodError\":");
+		append(json_meshes, lod_error);
+
+		if (settings.keep_extras && prim.extras.data)
+		{
+			append(json_meshes, ",\"sourceExtras\":");
+			appendJson(json_meshes, prim.extras.data);
+		}
+
+		append(json_meshes, "}");
+	}
+	else if (settings.keep_extras)
+	{
+		writeExtras(json_meshes, prim.extras);
+	}
+}
+
 int gltfpack(const char* input, const char* output, const char* report, Settings settings)
 {
 	cgltf_data* data = NULL;
@@ -1265,6 +1318,7 @@ Settings defaults()
 	settings.mesh_dedup = true;
 	settings.simplify_ratio = 1.f;
 	settings.simplify_error = 1e-2f;
+	settings.simplify_lod = 0;
 
 	for (int kind = 0; kind < TextureKind__Count; ++kind)
 	{
@@ -1442,6 +1496,10 @@ int main(int argc, char** argv)
 		else if (strcmp(arg, "-si") == 0 && i + 1 < argc && isdigit(argv[i + 1][0]))
 		{
 			settings.simplify_ratio = clamp(float(atof(argv[++i])), 0.f, 1.f);
+		}
+		else if (strcmp(arg, "-sl") == 0 && i + 1 < argc && isdigit(argv[i + 1][0]))
+		{
+			settings.simplify_lod = clamp(atoi(argv[++i]), 2, 64);
 		}
 		else if (strcmp(arg, "-se") == 0 && i + 1 < argc && isdigit(argv[i + 1][0]))
 		{
@@ -1684,6 +1742,7 @@ int main(int argc, char** argv)
 			fprintf(stderr, "\t... where C is a comma-separated list (no spaces) with valid values color,normal,attrib\n");
 			fprintf(stderr, "\nSimplification:\n");
 			fprintf(stderr, "\t-si R: simplify meshes targeting triangle/point count ratio R (default: 1; R should be between 0 and 1)\n");
+			fprintf(stderr, "\t-sl N: generate N LOD levels from the original mesh down to the -si ratio (default: 0; N should be at least 2)\n");
 			fprintf(stderr, "\t-se E: limit simplification error to E (default: 0.01 = 1%% deviation; E should be between 0 and 1)\n");
 			fprintf(stderr, "\t-sv: simplify with vertex position and attribute optimization\n");
 			fprintf(stderr, "\t-sp: use permissive simplification mode to allow simplification across attribute discontinuities\n");
@@ -1735,6 +1794,7 @@ int main(int argc, char** argv)
 			fprintf(stderr, "\t-tc: convert all textures to KTX2 with BasisU supercompression\n");
 			fprintf(stderr, "\t-tw: convert all textures to WebP\n");
 			fprintf(stderr, "\t-si R: simplify meshes targeting triangle/point count ratio R (between 0 and 1)\n");
+			fprintf(stderr, "\t-sl N: generate N LOD levels (requires -si)\n");
 			fprintf(stderr, "\nRun gltfpack -h to display a full list of options\n");
 		}
 
