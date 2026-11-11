@@ -1,10 +1,12 @@
 #include "../src/meshoptimizer.h"
 
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <vector>
 
 // This file uses assert() to verify algorithm correctness
@@ -2913,6 +2915,296 @@ static void dequantizeHalf()
 	assert(nanf != nanf);
 }
 
+static void quantizeAttributes()
+{
+	const size_t count = 33 * 33;
+	const size_t stride = 16 * sizeof(float);
+
+	std::vector<float> vertices(count * 16);
+
+	for (size_t y = 0; y < 33; ++y)
+		for (size_t x = 0; x < 33; ++x)
+		{
+			size_t i = y * 33 + x;
+			float u = float(x) / 32.f;
+			float v = float(y) / 32.f;
+
+			vertices[i * 16 + 0] = u * 10.f;
+			vertices[i * 16 + 1] = v * 10.f;
+			vertices[i * 16 + 2] = sinf(float(x) * 0.1f) * 0.5f;
+
+			float nx = sinf(float(x) * 0.2f) * 0.3f;
+			float ny = cosf(float(y) * 0.2f) * 0.3f;
+			float nz = 1.f;
+			float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+			vertices[i * 16 + 3] = nx / nl;
+			vertices[i * 16 + 4] = ny / nl;
+			vertices[i * 16 + 5] = nz / nl;
+
+			vertices[i * 16 + 8] = u * 4.f;
+			vertices[i * 16 + 9] = v * 4.f;
+
+			vertices[i * 16 + 12] = 1.f;
+			vertices[i * 16 + 13] = 0.f;
+			vertices[i * 16 + 14] = 0.f;
+			vertices[i * 16 + 15] = 1.f;
+		}
+
+	meshopt_AttributeDesc attributes[4] = {};
+	attributes[0].type = meshopt_AttributePosition;
+	attributes[0].bits = 12;
+	attributes[0].offset = 0;
+	attributes[1].type = meshopt_AttributeNormal;
+	attributes[1].bits = 8;
+	attributes[1].flags = meshopt_AttributeOct;
+	attributes[1].offset = 12;
+	attributes[2].type = meshopt_AttributeTexcoord;
+	attributes[2].bits = 12;
+	attributes[2].flags = meshopt_AttributeWrap;
+	attributes[2].offset = 32;
+	attributes[3].type = meshopt_AttributeTangent;
+	attributes[3].bits = 8;
+	attributes[3].flags = meshopt_AttributeOct;
+	attributes[3].offset = 48;
+
+	size_t bound = meshopt_encodeAttributeSetBound(count, attributes, 4, stride);
+	assert(bound > 0);
+
+	std::vector<unsigned char> encoded(bound);
+	size_t encoded_size = meshopt_encodeAttributeSet(&encoded[0], encoded.size(), &vertices[0], count, stride, attributes, 4);
+	assert(encoded_size == bound);
+
+	std::vector<float> decoded(count * 16);
+	assert(meshopt_decodeAttributeSet(&decoded[0], count, stride, &encoded[0], encoded_size, attributes, 4) == 0);
+
+	// Position error is measured against the bounding box diagonal.
+	float minv[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+	float maxv[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+
+	for (size_t i = 0; i < count; ++i)
+		for (int k = 0; k < 3; ++k)
+		{
+			minv[k] = std::min(minv[k], vertices[i * 16 + k]);
+			maxv[k] = std::max(maxv[k], vertices[i * 16 + k]);
+		}
+
+	float diagonal = sqrtf((maxv[0] - minv[0]) * (maxv[0] - minv[0]) + (maxv[1] - minv[1]) * (maxv[1] - minv[1]) + (maxv[2] - minv[2]) * (maxv[2] - minv[2]));
+	double total_error = 0;
+	double max_error = 0;
+
+	for (size_t i = 0; i < count; ++i)
+	{
+		float dx = decoded[i * 16 + 0] - vertices[i * 16 + 0];
+		float dy = decoded[i * 16 + 1] - vertices[i * 16 + 1];
+		float dz = decoded[i * 16 + 2] - vertices[i * 16 + 2];
+		double error = sqrt(double(dx) * dx + double(dy) * dy + double(dz) * dz);
+
+		total_error += error;
+		max_error = std::max(max_error, error);
+	}
+
+	assert(diagonal > 0.f);
+	assert(total_error / double(count) <= diagonal * 0.0005);
+	assert(max_error <= diagonal * 0.0005);
+
+	// Repeated encode/decode must produce a bit-identical packet at every step.
+	std::vector<unsigned char> packet = encoded;
+	std::vector<unsigned char> next(bound);
+	std::vector<float> scratch(count * 16);
+
+	for (int iteration = 0; iteration < 100; ++iteration)
+	{
+		assert(meshopt_decodeAttributeSet(&scratch[0], count, stride, &packet[0], encoded_size, attributes, 4) == 0);
+
+		size_t next_size = meshopt_encodeAttributeSet(&next[0], next.size(), &scratch[0], count, stride, attributes, 4);
+		assert(next_size == encoded_size);
+		assert(memcmp(&next[0], &packet[0], encoded_size) == 0);
+
+		packet = next;
+	}
+
+	// All supported bit depths must round-trip for every attribute type.
+	for (int bits = 4; bits <= 12; bits += 4)
+	{
+		meshopt_AttributeDesc variants[4] = {};
+		variants[0] = attributes[0];
+		variants[0].bits = bits;
+		variants[1] = attributes[1];
+		variants[1].bits = bits;
+		variants[2] = attributes[2];
+		variants[2].bits = bits;
+		variants[3] = attributes[3];
+		variants[3].bits = bits;
+
+		size_t variant_bound = meshopt_encodeAttributeSetBound(count, variants, 4, stride);
+		assert(variant_bound > 0);
+
+		std::vector<unsigned char> variant(variant_bound);
+		size_t variant_size = meshopt_encodeAttributeSet(&variant[0], variant.size(), &vertices[0], count, stride, variants, 4);
+		assert(variant_size == variant_bound);
+
+		std::vector<float> variant_decoded(count * 16);
+		assert(meshopt_decodeAttributeSet(&variant_decoded[0], count, stride, &variant[0], variant_size, variants, 4) == 0);
+
+		std::vector<float> variant_first = variant_decoded;
+		std::vector<unsigned char> variant_next(variant_bound);
+		std::vector<float> variant_scratch(count * 16);
+
+		for (int iteration = 0; iteration < 100; ++iteration)
+		{
+			size_t variant_next_size = meshopt_encodeAttributeSet(&variant_next[0], variant_next.size(), &variant_decoded[0], count, stride, variants, 4);
+			assert(variant_next_size == variant_size);
+
+			assert(meshopt_decodeAttributeSet(&variant_scratch[0], count, stride, &variant_next[0], variant_next_size, variants, 4) == 0);
+			assert(memcmp(&variant_scratch[0], &variant_first[0], variant_first.size() * sizeof(float)) == 0);
+			assert(memcmp(&variant_next[0], &variant[0], variant_size) == 0);
+
+			variant = variant_next;
+			variant_decoded = variant_scratch;
+		}
+	}
+}
+
+static float interpolateUV(float a, float b, float t)
+{
+	return a + (b - a) * t;
+}
+
+static void quantizeAttributesWrap()
+{
+	meshopt_AttributeDesc uv = {};
+	uv.type = meshopt_AttributeTexcoord;
+	uv.bits = 12;
+	uv.flags = meshopt_AttributeWrap;
+
+	// Mesh 1: a quad whose two UV endpoints are the two sides of a wrap seam.
+	float seam_quad[] = {
+	    0.f, 0.f,
+	    1.f, 0.f,
+	    0.f, 1.f,
+	    1.f, 1.f,
+	};
+
+	size_t bound = meshopt_encodeAttributeSetBound(4, &uv, 1, sizeof(float) * 2);
+	std::vector<unsigned char> encoded(bound);
+	size_t encoded_size = meshopt_encodeAttributeSet(&encoded[0], encoded.size(), seam_quad, 4, sizeof(float) * 2, &uv, 1);
+	assert(encoded_size == bound);
+
+	float decoded[8];
+	assert(meshopt_decodeAttributeSet(decoded, 4, sizeof(float) * 2, &encoded[0], encoded_size, &uv, 1) == 0);
+
+	// 0 and 1 must remain on opposite sides of the seam; canonicalizing 1 to 0 would collapse the quad.
+	assert(fabsf(decoded[0] - 0.f) < 1e-6f);
+	assert(fabsf(decoded[2] - 1.f) < 1e-6f);
+	assert(fabsf(decoded[4] - 0.f) < 1e-6f);
+	assert(fabsf(decoded[6] - 1.f) < 1e-6f);
+
+	float midpoint = interpolateUV(decoded[0], decoded[2], 0.5f);
+	assert(fabsf(midpoint - 0.5f) <= 1.f / 4095.f);
+
+	// Mesh 2: vertices very close to the seam on each side must stay distinct after quantization.
+	float near_seam[] = {
+	    0.0005f, 0.25f,
+	    0.9995f, 0.25f,
+	    0.0005f, 0.75f,
+	    0.9995f, 0.75f,
+	};
+
+	std::vector<unsigned char> encoded_near(bound);
+	size_t encoded_near_size = meshopt_encodeAttributeSet(&encoded_near[0], encoded_near.size(), near_seam, 4, sizeof(float) * 2, &uv, 1);
+	assert(encoded_near_size == bound);
+
+	float decoded_near[8];
+	assert(meshopt_decodeAttributeSet(decoded_near, 4, sizeof(float) * 2, &encoded_near[0], encoded_near_size, &uv, 1) == 0);
+
+	assert(decoded_near[0] < 0.01f);
+	assert(decoded_near[2] > 0.99f);
+	assert(decoded_near[2] - decoded_near[0] > 0.98f);
+
+	for (int t = 1; t <= 3; ++t)
+	{
+		float fraction = float(t) / 4.f;
+		float expected = interpolateUV(near_seam[0], near_seam[2], fraction);
+		float actual = interpolateUV(decoded_near[0], decoded_near[2], fraction);
+
+		// The interpolation error stays within one quantization step; it must not jump across the seam.
+		assert(fabsf(actual - expected) <= 1.f / 4095.f);
+	}
+}
+
+static void quantizeAttributesCompatibility()
+{
+	// Existing vertex codec formats remain decodable; the new packed attribute codec is additive.
+	const unsigned int count = 16;
+	const unsigned int stride = 8;
+	unsigned char data[count * stride];
+
+	for (unsigned int i = 0; i < count * stride; ++i)
+		data[i] = (unsigned char)(i * 7 + i / 4);
+
+	for (int version = 0; version <= 1; ++version)
+	{
+		meshopt_encodeVertexVersion(version);
+
+		std::vector<unsigned char> buffer(meshopt_encodeVertexBufferBound(count, stride));
+		buffer.resize(meshopt_encodeVertexBuffer(&buffer[0], buffer.size(), data, count, stride));
+		assert(!buffer.empty());
+
+		unsigned char decoded[count * stride];
+		assert(meshopt_decodeVertexBuffer(decoded, count, stride, &buffer[0], buffer.size()) == 0);
+		assert(memcmp(decoded, data, sizeof(data)) == 0);
+	}
+
+	meshopt_encodeVertexVersion(1);
+}
+
+static void quantizeAttributesFoldBoundary()
+{
+	// Values near the negative-Z octahedral fold boundary have two equivalent codes;
+	// encoding must canonicalize them so repeated cycles stay byte-identical.
+	float vertices[4 * 16] = {};
+	float normals[4][3] = {
+	    {-0.000123f, 0.443990f, -0.896032f},
+	    {0.000123f, 0.443990f, -0.896032f},
+	    {0.443990f, -0.000123f, -0.896032f},
+	    {0.443990f, 0.000123f, -0.896032f},
+	};
+
+	for (int i = 0; i < 4; ++i)
+	{
+		vertices[i * 16 + 3] = normals[i][0];
+		vertices[i * 16 + 4] = normals[i][1];
+		vertices[i * 16 + 5] = normals[i][2];
+		vertices[i * 16 + 12] = normals[i][0];
+		vertices[i * 16 + 13] = normals[i][1];
+		vertices[i * 16 + 14] = normals[i][2];
+		vertices[i * 16 + 15] = i % 2 ? -1.f : 1.f;
+	}
+
+	meshopt_AttributeDesc attributes[2] = {};
+	attributes[0].type = meshopt_AttributeNormal;
+	attributes[0].bits = 8;
+	attributes[0].flags = meshopt_AttributeOct;
+	attributes[0].offset = 12;
+	attributes[1].type = meshopt_AttributeTangent;
+	attributes[1].bits = 8;
+	attributes[1].flags = meshopt_AttributeOct;
+	attributes[1].offset = 48;
+
+	size_t bound = meshopt_encodeAttributeSetBound(4, attributes, 2, 16 * sizeof(float));
+	std::vector<unsigned char> encoded(bound);
+	size_t encoded_size = meshopt_encodeAttributeSet(&encoded[0], encoded.size(), vertices, 4, 16 * sizeof(float), attributes, 2);
+	assert(encoded_size == bound);
+
+	float decoded[4 * 16];
+	assert(meshopt_decodeAttributeSet(decoded, 4, 16 * sizeof(float), &encoded[0], encoded_size, attributes, 2) == 0);
+
+	std::vector<unsigned char> next(bound);
+	size_t next_size = meshopt_encodeAttributeSet(&next[0], next.size(), decoded, 4, 16 * sizeof(float), attributes, 2);
+	assert(next_size == encoded_size);
+	assert(memcmp(&next[0], &encoded[0], encoded_size) == 0);
+}
+
 static int validatePositionExponent(const float minv[3], const float maxv[3], int min_exponent, int max_bits)
 {
 	int exponent = meshopt_computePositionExponent(minv, maxv, min_exponent, max_bits);
@@ -3690,6 +3982,10 @@ void runTests()
 	quantizeFloat();
 	quantizeHalf();
 	dequantizeHalf();
+	quantizeAttributes();
+	quantizeAttributesWrap();
+	quantizeAttributesCompatibility();
+	quantizeAttributesFoldBoundary();
 	computePositionExponent();
 
 	encodeMeshletBound();

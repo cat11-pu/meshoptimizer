@@ -28,6 +28,7 @@ set(MESHOPT_GLTFPACK_LIBWEBP_PATH "" CACHE STRING "") # libwebp, https://github.
 set(SOURCES
     src/meshoptimizer.h
     src/allocator.cpp
+    src/attributecodec.cpp
     src/clusterizer.cpp
     src/indexanalyzer.cpp
     src/indexcodec.cpp

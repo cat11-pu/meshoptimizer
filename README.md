@@ -146,6 +146,23 @@ unsigned short pz = meshopt_quantizeHalf(v.z);
 
 Since quantized vertex attributes often need to remain in their compact representations for efficient transfer and storage, they are usually dequantized during vertex processing by configuring the GPU vertex input correctly to expect normalized integers or half precision floats, which often needs no or minimal changes to the shader code. When CPU dequantization is required instead, `meshopt_dequantizeHalf` can be used to convert half precision values back to single precision; for normalized integer formats, the dequantization just requires dividing by 2^N-1 for unorm and 2^(N-1)-1 for snorm variants. For example, manually reversing `meshopt_quantizeUnorm(v, 10)` can be done by dividing by 1023.
 
+#### Packed attribute quantization
+
+When the attributes are consumed by custom vertex decoding code rather than by the fixed-function GPU vertex fetch, they can be packed at the quantization bit depth instead of being expanded to a 8/16-bit container. `meshopt_encodeAttributeSet` supports 4-, 8- and 12-bit positions, normals, texture coordinates and tangents in a single self-describing buffer; the quantization ranges and bit depths are stored in the buffer, so `meshopt_decodeAttributeSet` can reconstruct the original float layout. Octahedral encoding (`meshopt_AttributeOct`) reduces normals to two N-bit components and tangents to two N-bit components plus a 1-bit handedness value. `meshopt_AttributeWrap` keeps periodic endpoints (such as UV 0 and 1 at a seam) distinct, preventing a seam from collapsing into the same quantized value.
+
+```c++
+meshopt_AttributeDesc attributes[4] = {};
+attributes[0] = {meshopt_AttributePosition, 12, 0, 0, 0};
+attributes[1] = {meshopt_AttributeNormal, 12, meshopt_AttributeOct, 12, 0};
+attributes[2] = {meshopt_AttributeTexcoord, 12, meshopt_AttributeWrap, 24, 0};
+attributes[3] = {meshopt_AttributeTangent, 12, meshopt_AttributeOct, 32, 0};
+
+std::vector<unsigned char> packed(meshopt_encodeAttributeSetBound(vertex_count, attributes, 4, sizeof(Vertex)));
+packed.resize(meshopt_encodeAttributeSet(&packed[0], packed.size(), &vertices[0].px, vertex_count, sizeof(Vertex), attributes, 4));
+```
+
+The packed format is separate from the lossless vertex codec format: existing `meshopt_encodeVertexBuffer`/`meshopt_decodeVertexBuffer` data and APIs are unchanged and remain compatible.
+
 ### Index filtering
 
 Some meshes may contain triangles that are processed during rendering but do not contribute to the rendered result. If any two vertices of a triangle result in the same position after vertex shader, the triangle is degenerate and will be skipped by the rasterizer. Some triangles may also be duplicates of an earlier triangle with the same post-transform positions and winding, in which case only one of the triangles will be visible depending on depth testing settings (assuming blending is disabled). In either case, such triangles require extra processing and removing them may improve rasterization or ray tracing performance; this library provides an algorithm that removes such triangles from the index buffer:

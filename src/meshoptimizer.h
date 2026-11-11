@@ -1003,6 +1003,65 @@ MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_remesh(float* destination, size_t max_
 MESHOPTIMIZER_API unsigned short meshopt_quantizeHalf(float v);
 
 /**
+ * Attribute types supported by the packed attribute codec
+ */
+enum meshopt_AttributeType
+{
+	meshopt_AttributePosition = 0,
+	meshopt_AttributeNormal = 1,
+	meshopt_AttributeTexcoord = 2,
+	meshopt_AttributeTangent = 3
+};
+
+/**
+ * Attribute flags supported by the packed attribute codec
+ * meshopt_AttributeOct enables octahedral encoding for normals and tangents (normals use 2 components, tangents use 2 components + 1-bit handedness)
+ * meshopt_AttributeWrap keeps periodic attribute endpoints (e.g. UV 0 and 1) distinct; values are never canonicalized across the wrap seam
+ */
+enum meshopt_AttributeFlags
+{
+	meshopt_AttributeOct = 1,
+	meshopt_AttributeWrap = 2
+};
+
+/**
+ * Packed attribute descriptor
+ * offset/stride specify where the attribute is located in the source float vertex buffer (for encode) or destination float vertex buffer (for decode)
+ * stride can be zero to use the vertex_stride argument passed to the encode/decode function
+ * bits must be 4, 8 or 12; components are implied by type (position: 3, normal: 3, texcoord: 2, tangent: 4)
+ */
+struct meshopt_AttributeDesc
+{
+	unsigned int type;
+	unsigned int bits;
+	unsigned int flags;
+	size_t offset;
+	size_t stride;
+};
+
+/**
+ * Computes an upper bound on the packed attribute buffer size
+ * vertex_count is the number of vertices; attributes describe the source/destination float vertex layout
+ * The bound is conservative and accounts for the self-describing header and all packed attribute payloads.
+ */
+MESHOPTIMIZER_API size_t meshopt_encodeAttributeSetBound(size_t vertex_count, const struct meshopt_AttributeDesc* attributes, size_t attribute_count, size_t vertex_stride);
+
+/**
+ * Encodes a set of float attributes into a compact self-describing packed buffer
+ * The codec supports 4/8/12-bit UNORM positions and texture coordinates, SNORM/octahedral normals and tangents, and keeps wrap endpoints distinct.
+ * The buffer stores the quantization ranges, bit depths and layout, so decoding only needs the buffer and the desired float layout.
+ * Returns the number of bytes written, or 0 if the buffer is too small or the attribute description is invalid.
+ */
+MESHOPTIMIZER_API size_t meshopt_encodeAttributeSet(unsigned char* buffer, size_t buffer_size, const float* vertices, size_t vertex_count, size_t vertex_stride, const struct meshopt_AttributeDesc* attributes, size_t attribute_count);
+
+/**
+ * Decodes a packed attribute buffer produced by meshopt_encodeAttributeSet into floating point values
+ * attributes provide the destination layout; their type/flags identify the attributes and must match the encoded buffer, while offset/stride control the output layout.
+ * Returns 0 on success and a negative value on failure (invalid header, layout mismatch or unsupported bit depth).
+ */
+MESHOPTIMIZER_API int meshopt_decodeAttributeSet(float* vertices, size_t vertex_count, size_t vertex_stride, const unsigned char* buffer, size_t buffer_size, const struct meshopt_AttributeDesc* attributes, size_t attribute_count);
+
+/**
  * Quantize a float into a floating point value with a limited number of significant mantissa bits, preserving the IEEE-754 fp32 binary representation
  * Preserves infinities/NaN, flushes denormals to zero, rounds to nearest
  * Assumes N is in a valid mantissa precision range, which is 1..23
