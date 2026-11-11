@@ -25,7 +25,7 @@ struct VertexScoreTable
 };
 } // namespace meshopt
 
-void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, const meshopt::VertexScoreTable* table);
+void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, const meshopt::VertexScoreTable* table, unsigned int cache_size, unsigned int entry_size);
 
 struct Profile
 {
@@ -216,7 +216,7 @@ void compute_metric(const State* state, const Mesh& mesh, float result[Profile_C
 		meshopt::VertexScoreTable table = {};
 		memcpy(table.cache + 1, state->cache, kCacheSizeMax * sizeof(float));
 		memcpy(table.live + 1, state->live, kValenceMax * sizeof(float));
-		meshopt_optimizeVertexCacheTable(&indices[0], &mesh.indices[0], mesh.indices.size(), mesh.vertex_count, &table);
+		meshopt_optimizeVertexCacheTable(&indices[0], &mesh.indices[0], mesh.indices.size(), mesh.vertex_count, &table, 16, 1);
 	}
 	else
 	{

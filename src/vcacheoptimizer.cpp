@@ -2,6 +2,7 @@
 #include "meshoptimizer.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <string.h>
 
 // This work is based on:
@@ -143,7 +144,11 @@ static unsigned int getNextVertexNeighbor(const unsigned int* next_candidates_be
 
 static float vertexScore(const VertexScoreTable* table, int cache_position, unsigned int live_triangles)
 {
-	assert(cache_position >= -1 && cache_position < int(kCacheSizeMax));
+	assert(cache_position >= -1);
+
+	// for caches larger than the score table, reuse the tail score: the vertex is in cache but unlikely to be reused soon
+	if (cache_position >= int(kCacheSizeMax))
+		cache_position = int(kCacheSizeMax) - 1;
 
 	unsigned int live_triangles_clamped = live_triangles < kValenceMax ? live_triangles : kValenceMax;
 
@@ -164,13 +169,102 @@ static unsigned int getNextTriangleDeadEnd(unsigned int& input_cursor, const uns
 	return ~0u;
 }
 
+static void updateVertexScore(const VertexScoreTable* table, TriangleAdjacency& adjacency, float* vertex_scores, float* triangle_scores, const unsigned int* live_triangles, const unsigned char* emitted_flags, unsigned int index, int cache_position, unsigned int& best_triangle, float& best_score)
+{
+	(void)emitted_flags;
+
+	// no need to update scores if we are never going to use this vertex
+	if (adjacency.counts[index] == 0)
+		return;
+
+	// update vertex score
+	float score = vertexScore(table, cache_position, live_triangles[index]);
+	float score_diff = score - vertex_scores[index];
+
+	vertex_scores[index] = score;
+
+	// update scores of vertex triangles
+	const unsigned int* neighbors_begin = &adjacency.data[0] + adjacency.offsets[index];
+	const unsigned int* neighbors_end = neighbors_begin + adjacency.counts[index];
+
+	for (const unsigned int* it = neighbors_begin; it != neighbors_end; ++it)
+	{
+		unsigned int tri = *it;
+		assert(!emitted_flags[tri]);
+
+		float tri_score = triangle_scores[tri] + score_diff;
+		assert(tri_score > 0);
+
+		best_triangle = best_score < tri_score ? tri : best_triangle;
+		best_score = best_score < tri_score ? tri_score : best_score;
+
+		triangle_scores[tri] = tri_score;
+	}
+}
+
+static void cacheMoveToFront(unsigned int& head, unsigned int& tail, unsigned int* next, unsigned int* prev, unsigned char* in_cache, size_t& count, unsigned int index)
+{
+	if (in_cache[index])
+	{
+		unsigned int p = prev[index], n = next[index];
+
+		if (p != ~0u)
+			next[p] = n;
+		else
+			head = n;
+
+		if (n != ~0u)
+			prev[n] = p;
+		else
+			tail = p;
+	}
+	else
+	{
+		in_cache[index] = 1;
+		count++;
+	}
+
+	prev[index] = ~0u;
+	next[index] = head;
+
+	if (head != ~0u)
+		prev[head] = index;
+
+	head = index;
+
+	if (tail == ~0u)
+		tail = index;
+}
+
+static void cacheEvict(unsigned int& head, unsigned int& tail, unsigned int* next, unsigned int* prev, unsigned char* in_cache, size_t& count, size_t evict_count, unsigned int* evicted, size_t& evicted_count)
+{
+	while (evict_count-- && tail != ~0u)
+	{
+		unsigned int index = tail;
+		unsigned int p = prev[index];
+
+		tail = p;
+
+		if (p != ~0u)
+			next[p] = ~0u;
+		else
+			head = ~0u;
+
+		in_cache[index] = 0;
+		count--;
+		evicted[evicted_count++] = index;
+	}
+}
+
 } // namespace meshopt
 
-void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, const meshopt::VertexScoreTable* table)
+void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, const meshopt::VertexScoreTable* table, unsigned int cache_size, unsigned int entry_size)
 {
 	using namespace meshopt;
 
 	assert(index_count % 3 == 0);
+	assert(cache_size >= 3);
+	assert(entry_size >= 1 && entry_size <= cache_size);
 
 	meshopt_Allocator allocator;
 
@@ -185,9 +279,6 @@ void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned 
 		memcpy(indices_copy, indices, index_count * sizeof(unsigned int));
 		indices = indices_copy;
 	}
-
-	unsigned int cache_size = 16;
-	assert(cache_size <= kCacheSizeMax);
 
 	size_t face_count = index_count / 3;
 
@@ -220,10 +311,18 @@ void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned 
 		triangle_scores[i] = vertex_scores[a] + vertex_scores[b] + vertex_scores[c];
 	}
 
-	unsigned int cache_holder[2 * (kCacheSizeMax + 4)];
-	unsigned int* cache = cache_holder;
-	unsigned int* cache_new = cache_holder + kCacheSizeMax + 4;
+	// cache simulation: LRU list ordered from most to least recently used; entries are evicted from the tail
+	unsigned int* cache_next = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* cache_prev = allocator.allocate<unsigned int>(vertex_count);
+	unsigned char* cache_in = allocator.allocate<unsigned char>(vertex_count);
+	memset(cache_in, 0, vertex_count);
+
+	unsigned int cache_head = ~0u, cache_tail = ~0u;
 	size_t cache_count = 0;
+
+	// at most 3 vertices are inserted per triangle, so at most entry_size + 2 vertices are evicted at once
+	unsigned int* evicted = allocator.allocate<unsigned int>(entry_size + 3);
+	size_t evicted_count = 0;
 
 	unsigned int current_triangle = 0;
 	unsigned int input_cursor = 1;
@@ -248,24 +347,19 @@ void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned 
 		emitted_flags[current_triangle] = true;
 		triangle_scores[current_triangle] = 0;
 
-		// new triangle
-		size_t cache_write = 0;
-		cache_new[cache_write++] = a;
-		cache_new[cache_write++] = b;
-		cache_new[cache_write++] = c;
+		// new triangle; insert in reverse so that the cache order is a, b, c, <older entries>
+		cacheMoveToFront(cache_head, cache_tail, cache_next, cache_prev, cache_in, cache_count, c);
+		cacheMoveToFront(cache_head, cache_tail, cache_next, cache_prev, cache_in, cache_count, b);
+		cacheMoveToFront(cache_head, cache_tail, cache_next, cache_prev, cache_in, cache_count, a);
 
-		// old triangles
-		for (size_t i = 0; i < cache_count; ++i)
+		// when the cache overflows, evict least recently used entries; each evicted entry frees entry_size vertices
+		if (cache_count > cache_size)
 		{
-			unsigned int index = cache[i];
+			size_t overflow = cache_count - cache_size;
+			size_t evict_count = (overflow + entry_size - 1) / entry_size * entry_size;
 
-			cache_new[cache_write] = index;
-			cache_write += (index != a) & (index != b) & (index != c);
+			cacheEvict(cache_head, cache_tail, cache_next, cache_prev, cache_in, cache_count, evict_count, evicted, evicted_count);
 		}
-
-		unsigned int* cache_temp = cache;
-		cache = cache_new, cache_new = cache_temp;
-		cache_count = cache_write > cache_size ? cache_size : cache_write;
 
 		// remove emitted triangle from adjacency data
 		// this makes sure that we spend less time traversing these lists on subsequent iterations
@@ -294,40 +388,21 @@ void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned 
 		float best_score = 0;
 
 		// update cache positions, vertex scores and triangle scores, and find next best triangle
-		for (size_t i = 0; i < cache_write; ++i)
+		// entries beyond the score table are all scored as the table tail, so only the first kCacheSizeMax + 3
+		// entries can change score (a vertex can move by at most 3 positions per triangle); evicted vertices drop to -1
+		size_t head_count = cache_count < kCacheSizeMax + 3 ? cache_count : kCacheSizeMax + 3;
+		unsigned int cache_cursor = cache_head;
+
+		for (size_t i = 0; i < head_count; ++i)
 		{
-			unsigned int index = cache[i];
-
-			// no need to update scores if we are never going to use this vertex
-			if (adjacency.counts[index] == 0)
-				continue;
-
-			int cache_position = i >= cache_size ? -1 : int(i);
-
-			// update vertex score
-			float score = vertexScore(table, cache_position, live_triangles[index]);
-			float score_diff = score - vertex_scores[index];
-
-			vertex_scores[index] = score;
-
-			// update scores of vertex triangles
-			const unsigned int* neighbors_begin = &adjacency.data[0] + adjacency.offsets[index];
-			const unsigned int* neighbors_end = neighbors_begin + adjacency.counts[index];
-
-			for (const unsigned int* it = neighbors_begin; it != neighbors_end; ++it)
-			{
-				unsigned int tri = *it;
-				assert(!emitted_flags[tri]);
-
-				float tri_score = triangle_scores[tri] + score_diff;
-				assert(tri_score > 0);
-
-				best_triangle = best_score < tri_score ? tri : best_triangle;
-				best_score = best_score < tri_score ? tri_score : best_score;
-
-				triangle_scores[tri] = tri_score;
-			}
+			updateVertexScore(table, adjacency, vertex_scores, triangle_scores, live_triangles, emitted_flags, cache_cursor, int(i), best_triangle, best_score);
+			cache_cursor = cache_next[cache_cursor];
 		}
+
+		for (size_t i = 0; i < evicted_count; ++i)
+			updateVertexScore(table, adjacency, vertex_scores, triangle_scores, live_triangles, emitted_flags, evicted[i], -1, best_triangle, best_score);
+
+		evicted_count = 0;
 
 		// step through input triangles in order if we hit a dead-end
 		current_triangle = best_triangle;
@@ -344,12 +419,26 @@ void meshopt_optimizeVertexCacheTable(unsigned int* destination, const unsigned 
 
 void meshopt_optimizeVertexCache(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count)
 {
-	meshopt_optimizeVertexCacheTable(destination, indices, index_count, vertex_count, &meshopt::kVertexScoreTable);
+	meshopt_optimizeVertexCacheTable(destination, indices, index_count, vertex_count, &meshopt::kVertexScoreTable, 16, 1);
 }
 
 void meshopt_optimizeVertexCacheStrip(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count)
 {
-	meshopt_optimizeVertexCacheTable(destination, indices, index_count, vertex_count, &meshopt::kVertexScoreTableStrip);
+	meshopt_optimizeVertexCacheTable(destination, indices, index_count, vertex_count, &meshopt::kVertexScoreTableStrip, 16, 1);
+}
+
+void meshopt_optimizeVertexCacheCustom(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, unsigned int cache_entries, unsigned int entry_size)
+{
+	using namespace meshopt;
+
+	assert(cache_entries >= 1);
+	assert(entry_size >= 1);
+
+	size_t cache_size = size_t(cache_entries) * entry_size;
+	assert(cache_size / cache_entries == entry_size);
+	assert(cache_size >= 3 && cache_size <= UINT_MAX);
+
+	meshopt_optimizeVertexCacheTable(destination, indices, index_count, vertex_count, &kVertexScoreTable, unsigned(cache_size), entry_size);
 }
 
 void meshopt_optimizeVertexCacheFifo(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, unsigned int cache_size)

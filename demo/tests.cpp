@@ -2,9 +2,14 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include <algorithm>
+#include <map>
+#include <string>
 #include <vector>
 
 // This file uses assert() to verify algorithm correctness
@@ -1765,7 +1770,513 @@ static void emptyMesh()
 {
 	meshopt_optimizeVertexCache(NULL, NULL, 0, 0);
 	meshopt_optimizeVertexCacheFifo(NULL, NULL, 0, 0, 16);
+	meshopt_optimizeVertexCacheCustom(NULL, NULL, 0, 0, 32, 32);
 	meshopt_optimizeOverdraw(NULL, NULL, 0, NULL, 0, 12, 1.f);
+}
+
+// Vertex cache optimizer with custom cache geometry
+struct VCacheVertex
+{
+	float px, py, pz; // position
+	float u, v;      // additional vertex attribute
+	unsigned int id; // unique vertex id, used to track attribute integrity
+};
+
+struct VCacheMesh
+{
+	const char* name;
+	std::vector<VCacheVertex> vertices;
+	std::vector<unsigned int> indices;
+	std::vector<unsigned int> materials; // one material per face
+};
+
+static void vcacheMeshGrid(VCacheMesh& mesh, int size)
+{
+	for (int y = 0; y <= size; ++y)
+		for (int x = 0; x <= size; ++x)
+		{
+			VCacheVertex v = {float(x) / size, 0.f, float(y) / size, float(x) / size, float(y) / size, unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(v);
+		}
+
+	for (int y = 0; y < size; ++y)
+		for (int x = 0; x < size; ++x)
+		{
+			unsigned int a = unsigned(y * (size + 1) + x), b = a + 1, c = a + unsigned(size + 1), d = c + 1;
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+}
+
+static void vcacheMeshSphere(VCacheMesh& mesh, int slices, int stacks)
+{
+	const float pi = 3.14159265f;
+
+	for (int st = 0; st <= stacks; ++st)
+	{
+		float theta = float(st) / stacks * pi;
+
+		for (int sl = 0; sl <= slices; ++sl)
+		{
+			float phi = float(sl) / slices * 2.f * pi;
+			VCacheVertex v = {sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi), float(sl) / slices, float(st) / stacks, unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(v);
+		}
+	}
+
+	for (int st = 0; st < stacks; ++st)
+		for (int sl = 0; sl < slices; ++sl)
+		{
+			unsigned int a = unsigned(st * (slices + 1) + sl), b = a + 1, c = a + unsigned(slices + 1), d = c + 1;
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+}
+
+static void vcacheMeshTorus(VCacheMesh& mesh, int major, int minor)
+{
+	const float pi = 3.14159265f;
+
+	for (int i = 0; i <= major; ++i)
+	{
+		float u = float(i) / major * 2.f * pi;
+
+		for (int j = 0; j <= minor; ++j)
+		{
+			float v = float(j) / minor * 2.f * pi;
+			float r = 1.f + 0.4f * cosf(v);
+
+			VCacheVertex vert = {r * cosf(u), 0.4f * sinf(v), r * sinf(u), float(i) / major, float(j) / minor, unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(vert);
+		}
+	}
+
+	for (int i = 0; i < major; ++i)
+		for (int j = 0; j < minor; ++j)
+		{
+			unsigned int a = unsigned(i * (minor + 1) + j), b = a + 1, c = a + unsigned(minor + 1), d = c + 1;
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+}
+
+static void vcacheMeshCylinder(VCacheMesh& mesh, int segments, int rings)
+{
+	const float pi = 3.14159265f;
+
+	for (int r = 0; r <= rings; ++r)
+		for (int s = 0; s <= segments; ++s)
+		{
+			float a = float(s) / segments * 2.f * pi;
+			VCacheVertex v = {cosf(a), float(r) / rings * 2.f - 1.f, sinf(a), float(s) / segments, float(r) / rings, unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(v);
+		}
+
+	for (int r = 0; r < rings; ++r)
+		for (int s = 0; s < segments; ++s)
+		{
+			unsigned int a = unsigned(r * (segments + 1) + s), b = a + 1, c = a + unsigned(segments + 1), d = c + 1;
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+
+	for (int cap = 0; cap < 2; ++cap)
+	{
+		float y = cap ? 1.f : -1.f;
+
+		unsigned int center = unsigned(mesh.vertices.size());
+		VCacheVertex cv = {0.f, y, 0.f, 0.5f, 0.5f, center};
+		mesh.vertices.push_back(cv);
+
+		unsigned int ring = unsigned(mesh.vertices.size());
+
+		for (int s = 0; s <= segments; ++s)
+		{
+			float a = float(s) / segments * 2.f * pi;
+			VCacheVertex v = {cosf(a), y, sinf(a), 0.5f + 0.5f * cosf(a), 0.5f + 0.5f * sinf(a), unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(v);
+		}
+
+		for (int s = 0; s < segments; ++s)
+		{
+			if (cap)
+			{
+				mesh.indices.push_back(center);
+				mesh.indices.push_back(ring + unsigned(s));
+				mesh.indices.push_back(ring + unsigned(s) + 1);
+			}
+			else
+			{
+				mesh.indices.push_back(center);
+				mesh.indices.push_back(ring + unsigned(s) + 1);
+				mesh.indices.push_back(ring + unsigned(s));
+			}
+		}
+	}
+}
+
+static void vcacheMeshKnot(VCacheMesh& mesh, int segments, int sides)
+{
+	const float pi = 3.14159265f;
+
+	for (int i = 0; i <= segments; ++i)
+	{
+		float t = float(i) / segments * 2.f * pi;
+		float r = 2.f + cosf(3.f * t);
+
+		float cx = r * cosf(2.f * t), cy = r * sinf(2.f * t), cz = sinf(3.f * t);
+
+		float dr = -3.f * sinf(3.f * t);
+		float tx = dr * cosf(2.f * t) - 2.f * r * sinf(2.f * t);
+		float ty = dr * sinf(2.f * t) + 2.f * r * cosf(2.f * t);
+		float tz = 3.f * cosf(3.f * t);
+
+		float tl = sqrtf(tx * tx + ty * ty + tz * tz);
+		tx /= tl, ty /= tl, tz /= tl;
+
+		// normal = normalize(cross(tangent, z-axis))
+		float nx = ty, ny = -tx, nz = 0.f;
+		float nl = sqrtf(nx * nx + ny * ny);
+		if (nl < 1e-6f)
+			nx = 1.f, ny = 0.f, nl = 1.f;
+		nx /= nl, ny /= nl;
+
+		// binormal = cross(tangent, normal)
+		float bx = ty * nz - tz * ny, by = tz * nx - tx * nz, bz = tx * ny - ty * nx;
+
+		for (int j = 0; j <= sides; ++j)
+		{
+			float a = float(j) / sides * 2.f * pi;
+			float rx = cosf(a) * nx + sinf(a) * bx;
+			float ry = cosf(a) * ny + sinf(a) * by;
+			float rz = cosf(a) * nz + sinf(a) * bz;
+
+			VCacheVertex v = {cx + 0.4f * rx, cy + 0.4f * ry, cz + 0.4f * rz, float(i) / segments, float(j) / sides, unsigned(mesh.vertices.size())};
+			mesh.vertices.push_back(v);
+		}
+	}
+
+	for (int i = 0; i < segments; ++i)
+		for (int j = 0; j < sides; ++j)
+		{
+			unsigned int a = unsigned(i * (sides + 1) + j), b = a + 1, c = a + unsigned(sides + 1), d = c + 1;
+
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+}
+
+static void vcacheMeshMaterials(VCacheMesh& mesh, unsigned int material_count)
+{
+	size_t face_count = mesh.indices.size() / 3;
+
+	mesh.materials.resize(face_count);
+
+	for (size_t i = 0; i < face_count; ++i)
+		mesh.materials[i] = unsigned(i * material_count / face_count);
+}
+
+// shuffles face order within each material range, emulating an unoptimized asset with material groups
+static void vcacheShuffleFaces(VCacheMesh& mesh, unsigned int material_count)
+{
+	size_t face_count = mesh.indices.size() / 3;
+	unsigned int seed = 12345;
+
+	for (unsigned int material = 0; material < material_count; ++material)
+	{
+		size_t begin = face_count * material / material_count;
+		size_t end = face_count * (material + 1) / material_count;
+
+		for (size_t i = end; i > begin + 1; --i)
+		{
+			seed = seed * 1103515245u + 12345u;
+			size_t j = begin + seed % (i - begin);
+
+			for (int k = 0; k < 3; ++k)
+			{
+				unsigned int temp = mesh.indices[(i - 1) * 3 + k];
+				mesh.indices[(i - 1) * 3 + k] = mesh.indices[j * 3 + k];
+				mesh.indices[j * 3 + k] = temp;
+			}
+
+			unsigned int temp = mesh.materials[i - 1];
+			mesh.materials[i - 1] = mesh.materials[j];
+			mesh.materials[j] = temp;
+		}
+	}
+}
+
+static std::vector<std::string> vcacheRenderSignature(const std::vector<unsigned int>& indices, const std::vector<VCacheVertex>& vertices, const std::vector<unsigned int>& materials)
+{
+	std::vector<std::string> records;
+
+	for (size_t i = 0; i < indices.size(); i += 3)
+	{
+		std::string record;
+
+		for (int k = 0; k < 3; ++k)
+		{
+			const VCacheVertex& v = vertices[indices[i + k]];
+			record.append(reinterpret_cast<const char*>(&v), sizeof(v));
+		}
+
+		record.append(reinterpret_cast<const char*>(&materials[i / 3]), sizeof(unsigned int));
+		records.push_back(record);
+	}
+
+	std::sort(records.begin(), records.end());
+	return records;
+}
+
+// rebuilds per-face material ids after triangle reordering; every output triangle must match an input triangle with the same winding
+static std::vector<unsigned int> vcacheRemapMaterials(const VCacheMesh& mesh, const std::vector<unsigned int>& indices)
+{
+	std::map<std::string, unsigned int> face_materials;
+
+	for (size_t i = 0; i < mesh.indices.size(); i += 3)
+	{
+		std::string key;
+
+		for (int k = 0; k < 3; ++k)
+		{
+			unsigned int id = mesh.vertices[mesh.indices[i + k]].id;
+			key.append(reinterpret_cast<const char*>(&id), sizeof(id));
+		}
+
+		face_materials[key] = mesh.materials[i / 3];
+	}
+
+	std::vector<unsigned int> materials(indices.size() / 3);
+
+	for (size_t i = 0; i < indices.size(); i += 3)
+	{
+		std::string key;
+
+		for (int k = 0; k < 3; ++k)
+		{
+			unsigned int id = mesh.vertices[indices[i + k]].id;
+			key.append(reinterpret_cast<const char*>(&id), sizeof(id));
+		}
+
+		std::map<std::string, unsigned int>::const_iterator it = face_materials.find(key);
+		assert(it != face_materials.end());
+		materials[i / 3] = it->second;
+	}
+
+	return materials;
+}
+
+static double vcacheTimestamp()
+{
+	return double(clock()) / double(CLOCKS_PER_SEC);
+}
+
+static void vcacheCustom()
+{
+	VCacheMesh mesh = {};
+	mesh.name = "grid10";
+	vcacheMeshGrid(mesh, 10);
+
+	size_t vertex_count = mesh.vertices.size();
+	size_t index_count = mesh.indices.size();
+
+	// a cache with 16 single-vertex entries must match meshopt_optimizeVertexCache exactly
+	std::vector<unsigned int> ib_default(index_count);
+	meshopt_optimizeVertexCache(&ib_default[0], &mesh.indices[0], index_count, vertex_count);
+
+	std::vector<unsigned int> ib_custom(index_count);
+	meshopt_optimizeVertexCacheCustom(&ib_custom[0], &mesh.indices[0], index_count, vertex_count, 16, 1);
+	assert(ib_custom == ib_default);
+
+	// larger cache geometries produce a valid triangle permutation
+	for (unsigned int entry = 1; entry <= 32; entry *= 2)
+	{
+		std::vector<unsigned int> ib(index_count);
+		meshopt_optimizeVertexCacheCustom(&ib[0], &mesh.indices[0], index_count, vertex_count, 32, entry);
+
+		std::vector<std::string> before = vcacheRenderSignature(mesh.indices, mesh.vertices, std::vector<unsigned int>(index_count / 3, 0));
+		std::vector<std::string> after = vcacheRenderSignature(ib, mesh.vertices, std::vector<unsigned int>(index_count / 3, 0));
+		assert(before == after);
+	}
+
+	// in-place optimization is supported
+	std::vector<unsigned int> ib_inplace = mesh.indices;
+	meshopt_optimizeVertexCacheCustom(&ib_inplace[0], &ib_inplace[0], index_count, vertex_count, 32, 32);
+	assert(vcacheRenderSignature(mesh.indices, mesh.vertices, std::vector<unsigned int>(index_count / 3, 0)) == vcacheRenderSignature(ib_inplace, mesh.vertices, std::vector<unsigned int>(index_count / 3, 0)));
+
+	// degenerate triangles repeat indices within a triangle; the cache simulation must stay valid
+	VCacheMesh degenerate = {};
+
+	for (unsigned int i = 0; i < 5; ++i)
+	{
+		VCacheVertex v = {0.f, 0.f, 0.f, 0.f, 0.f, i};
+		degenerate.vertices.push_back(v);
+	}
+
+	unsigned int degenerate_indices[] = {0, 0, 1, 1, 2, 2, 2, 3, 1, 3, 4, 4};
+	degenerate.indices.assign(degenerate_indices, degenerate_indices + 12);
+
+	std::vector<unsigned int> ib_degenerate(12);
+	meshopt_optimizeVertexCacheCustom(&ib_degenerate[0], &degenerate.indices[0], 12, 5, 4, 2);
+	assert(vcacheRenderSignature(degenerate.indices, degenerate.vertices, std::vector<unsigned int>(4, 0)) == vcacheRenderSignature(ib_degenerate, degenerate.vertices, std::vector<unsigned int>(4, 0)));
+}
+
+static void vcacheCustomMeshes()
+{
+	const unsigned int cache_entries = 32;
+	const unsigned int entry_size = 32;
+	const unsigned int cache_size = cache_entries * entry_size;
+
+	VCacheMesh meshes[5];
+
+	meshes[0].name = "grid";
+	vcacheMeshGrid(meshes[0], 100);
+
+	meshes[1].name = "sphere";
+	vcacheMeshSphere(meshes[1], 128, 64);
+
+	meshes[2].name = "torus";
+	vcacheMeshTorus(meshes[2], 128, 64);
+
+	meshes[3].name = "cylinder";
+	vcacheMeshCylinder(meshes[3], 128, 32);
+
+	meshes[4].name = "knot";
+	vcacheMeshKnot(meshes[4], 256, 32);
+
+	for (int i = 0; i < 5; ++i)
+	{
+		vcacheMeshMaterials(meshes[i], 4);
+		vcacheShuffleFaces(meshes[i], 4);
+	}
+
+	printf("%-9s %7s %7s | %7s %7s %7s | %7s %7s %7s | %8s %9s\n",
+	    "mesh", "verts", "tris", "ACMR0", "ACMRvc", "ACMRod", "OD0", "ODvc", "ODod", "vcache", "simplify");
+
+	for (int m = 0; m < 5; ++m)
+	{
+		const VCacheMesh& mesh = meshes[m];
+		size_t vertex_count = mesh.vertices.size();
+		size_t index_count = mesh.indices.size();
+
+		// material ranges are optimized individually, as recommended for draw-call ranges
+		std::vector<unsigned int> ib_vcache(index_count), ib_overdraw(index_count);
+		size_t face_count = index_count / 3;
+		size_t range_start = 0;
+
+		for (unsigned int material = 0; material < 4; ++material)
+		{
+			size_t range_end = face_count * (material + 1) / 4;
+			size_t range_index_count = (range_end - range_start) * 3;
+
+			// vertex cache optimization with custom cache geometry
+			meshopt_optimizeVertexCacheCustom(&ib_vcache[range_start * 3], &mesh.indices[range_start * 3], range_index_count, vertex_count, cache_entries, entry_size);
+
+			// overdraw optimization
+			meshopt_optimizeOverdraw(&ib_overdraw[range_start * 3], &ib_vcache[range_start * 3], range_index_count, &mesh.vertices[0].px, vertex_count, sizeof(VCacheVertex), 1.05f);
+
+			range_start = range_end;
+		}
+
+		std::vector<unsigned int> materials_overdraw = vcacheRemapMaterials(mesh, ib_overdraw);
+
+		// material grouping must be preserved: no face may move to a different material range
+		assert(materials_overdraw == mesh.materials);
+
+		// vertex fetch optimization renumbers vertices; attributes must follow them
+		std::vector<VCacheVertex> vertices_fetch(vertex_count);
+		std::vector<unsigned int> ib_fetch = ib_overdraw;
+		size_t vertex_count_fetch = meshopt_optimizeVertexFetch(&vertices_fetch[0], &ib_fetch[0], index_count, &mesh.vertices[0], vertex_count, sizeof(VCacheVertex));
+		vertices_fetch.resize(vertex_count_fetch);
+
+		// render equivalence: winding order, material grouping and vertex attributes are all preserved
+		std::vector<std::string> signature_before = vcacheRenderSignature(mesh.indices, mesh.vertices, mesh.materials);
+		std::vector<std::string> signature_after = vcacheRenderSignature(ib_fetch, vertices_fetch, materials_overdraw);
+		assert(signature_before == signature_after);
+
+		// ACMR is measured against the target cache geometry
+		meshopt_VertexCacheStatistics stats0 = meshopt_analyzeVertexCache(&mesh.indices[0], index_count, vertex_count, cache_size, 0, 0);
+		meshopt_VertexCacheStatistics stats1 = meshopt_analyzeVertexCache(&ib_vcache[0], index_count, vertex_count, cache_size, 0, 0);
+		meshopt_VertexCacheStatistics stats2 = meshopt_analyzeVertexCache(&ib_overdraw[0], index_count, vertex_count, cache_size, 0, 0);
+
+		assert(stats1.acmr <= 0.75f);
+		assert(stats2.acmr <= 0.75f);
+
+		// overdraw must not get worse after overdraw optimization (compared to its input, the vcache-optimized mesh)
+		meshopt_OverdrawStatistics overdraw0 = meshopt_analyzeOverdraw(&mesh.indices[0], index_count, &mesh.vertices[0].px, vertex_count, sizeof(VCacheVertex));
+		meshopt_OverdrawStatistics overdraw1 = meshopt_analyzeOverdraw(&ib_vcache[0], index_count, &mesh.vertices[0].px, vertex_count, sizeof(VCacheVertex));
+		meshopt_OverdrawStatistics overdraw2 = meshopt_analyzeOverdraw(&ib_overdraw[0], index_count, &mesh.vertices[0].px, vertex_count, sizeof(VCacheVertex));
+
+		assert(overdraw2.overdraw <= overdraw1.overdraw);
+
+		// benchmark: vertex cache optimization must stay within the same order of magnitude as simplification
+		const int vcache_iterations = 10;
+		const int simplify_iterations = 3;
+
+		double vcache_time = 0;
+
+		for (int it = 0; it < vcache_iterations; ++it)
+		{
+			double start = vcacheTimestamp();
+			size_t bench_start = 0;
+
+			for (unsigned int material = 0; material < 4; ++material)
+			{
+				size_t bench_end = face_count * (material + 1) / 4;
+				meshopt_optimizeVertexCacheCustom(&ib_vcache[bench_start * 3], &mesh.indices[bench_start * 3], (bench_end - bench_start) * 3, vertex_count, cache_entries, entry_size);
+				bench_start = bench_end;
+			}
+
+			vcache_time += vcacheTimestamp() - start;
+		}
+
+		vcache_time /= vcache_iterations;
+
+		std::vector<unsigned int> ib_simplify(index_count);
+		double simplify_time = 0;
+
+		for (int it = 0; it < simplify_iterations; ++it)
+		{
+			double start = vcacheTimestamp();
+			meshopt_simplify(&ib_simplify[0], &mesh.indices[0], index_count, &mesh.vertices[0].px, vertex_count, sizeof(VCacheVertex), index_count / 2, 0.05f, 0, 0);
+			simplify_time += vcacheTimestamp() - start;
+		}
+
+		simplify_time /= simplify_iterations;
+
+		// vertex cache optimization must stay in the same performance class as simplification
+		assert(vcache_time <= simplify_time * 2);
+
+		printf("%-9s %7d %7d | %7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f | %7.3fms %8.3fms\n",
+		    mesh.name, int(vertex_count), int(index_count / 3),
+		    stats0.acmr, stats1.acmr, stats2.acmr,
+		    overdraw0.overdraw, overdraw1.overdraw, overdraw2.overdraw,
+		    vcache_time * 1e3, simplify_time * 1e3);
+	}
 }
 
 static void simplify()
@@ -3654,6 +4165,8 @@ void runTests()
 	customAllocator();
 
 	emptyMesh();
+	vcacheCustom();
+	vcacheCustomMeshes();
 
 	simplify();
 	simplifyStuck();

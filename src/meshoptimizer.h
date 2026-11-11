@@ -227,6 +227,19 @@ MESHOPTIMIZER_API void meshopt_optimizeVertexCacheStrip(unsigned int* destinatio
 MESHOPTIMIZER_API void meshopt_optimizeVertexCacheFifo(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, unsigned int cache_size);
 
 /**
+ * Vertex transform cache optimizer for caches with configurable geometry
+ * Reorders indices to reduce the number of GPU vertex shader invocations
+ * Models the post-transform cache as cache_entries LRU entries of entry_size vertices each; when the cache is full,
+ * a least recently used entry is evicted as a whole, freeing entry_size vertices.
+ * If index buffer contains multiple ranges for multiple draw calls, this function needs to be called on each range individually.
+ *
+ * destination must contain enough space for the resulting index buffer (index_count elements)
+ * cache_entries is the number of cache entries; cache_entries * entry_size must be at least 3
+ * entry_size is the number of vertices each cache entry can hold (must be non-zero)
+ */
+MESHOPTIMIZER_API void meshopt_optimizeVertexCacheCustom(unsigned int* destination, const unsigned int* indices, size_t index_count, size_t vertex_count, unsigned int cache_entries, unsigned int entry_size);
+
+/**
  * Overdraw optimizer
  * Reorders indices to reduce the number of GPU vertex shader invocations and the pixel overdraw
  * If index buffer contains multiple ranges for multiple draw calls, this function needs to be called on each range individually.
@@ -1104,6 +1117,8 @@ inline void meshopt_optimizeVertexCacheStrip(T* destination, const T* indices, s
 template <typename T>
 inline void meshopt_optimizeVertexCacheFifo(T* destination, const T* indices, size_t index_count, size_t vertex_count, unsigned int cache_size);
 template <typename T>
+inline void meshopt_optimizeVertexCacheCustom(T* destination, const T* indices, size_t index_count, size_t vertex_count, unsigned int cache_entries, unsigned int entry_size);
+template <typename T>
 inline void meshopt_optimizeOverdraw(T* destination, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, float threshold);
 template <typename T>
 inline size_t meshopt_optimizeVertexFetchRemap(unsigned int* destination, const T* indices, size_t index_count, size_t vertex_count);
@@ -1438,6 +1453,15 @@ inline void meshopt_optimizeVertexCacheFifo(T* destination, const T* indices, si
 	meshopt_IndexAdapter<T> out(destination, NULL, index_count);
 
 	meshopt_optimizeVertexCacheFifo(out.data, in.data, index_count, vertex_count, cache_size);
+}
+
+template <typename T>
+inline void meshopt_optimizeVertexCacheCustom(T* destination, const T* indices, size_t index_count, size_t vertex_count, unsigned int cache_entries, unsigned int entry_size)
+{
+	meshopt_IndexAdapter<T> in(NULL, indices, index_count);
+	meshopt_IndexAdapter<T> out(destination, NULL, index_count);
+
+	meshopt_optimizeVertexCacheCustom(out.data, in.data, index_count, vertex_count, cache_entries, entry_size);
 }
 
 template <typename T>
