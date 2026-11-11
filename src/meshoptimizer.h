@@ -290,6 +290,16 @@ MESHOPTIMIZER_API void meshopt_encodeIndexVersion(int version);
 MESHOPTIMIZER_API int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size);
 
 /**
+ * Index buffer decoder for a contiguous chunk of indices
+ * Decodes index data in the [index_offset, index_offset + index_count) range; the output buffer only needs to contain index_count * index_size bytes.
+ * This can be used to stream large triangle lists that are stored as a single bufferView without allocating the entire decoded buffer.
+ * index_total_count must match the index count used during encoding; both index_offset and index_count must be multiples of 3.
+ * destination is written starting at offset 0. Note that decoding a chunk still scans the encoded data preceding the chunk to restore the decoder state.
+ * Returns 0 if the requested range was decoded successfully, and an error code otherwise.
+ */
+MESHOPTIMIZER_EXPERIMENTAL int meshopt_decodeIndexBufferChunk(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size);
+
+/**
  * Get encoded index format version
  * Returns format version of the encoded index buffer/sequence, or -1 if the buffer header is invalid
  * Note that a non-negative value doesn't guarantee that the buffer will be decoded correctly if the input is malformed.
@@ -316,6 +326,15 @@ MESHOPTIMIZER_API size_t meshopt_encodeIndexSequenceBound(size_t index_count, si
  * destination must contain enough space for the resulting index sequence (index_count elements)
  */
 MESHOPTIMIZER_API int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size);
+
+/**
+ * Index sequence decoder for a contiguous chunk of indices
+ * Decodes index data in the [index_offset, index_offset + index_count) range; the output buffer only needs to contain index_count * index_size bytes.
+ * index_total_count must match the index count used during encoding; destination is written starting at offset 0.
+ * Note that decoding a chunk still scans the encoded data preceding the chunk to restore the decoder state.
+ * Returns 0 if the requested range was decoded successfully, and an error code otherwise.
+ */
+MESHOPTIMIZER_EXPERIMENTAL int meshopt_decodeIndexSequenceChunk(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size);
 
 /**
  * Meshlet encoder
@@ -396,6 +415,16 @@ MESHOPTIMIZER_API void meshopt_encodeVertexVersion(int version);
 MESHOPTIMIZER_API int meshopt_decodeVertexBuffer(void* destination, size_t vertex_count, size_t vertex_size, const unsigned char* buffer, size_t buffer_size);
 
 /**
+ * Vertex buffer decoder for a contiguous chunk of vertices
+ * Decodes vertex data in the [vertex_offset, vertex_offset + vertex_count) range; the output buffer only needs to contain vertex_count * vertex_size bytes.
+ * This can be used to stream large vertex streams that are stored as a single bufferView without allocating the entire decoded buffer.
+ * vertex_total_count must match the vertex count used during encoding; destination is written starting at offset 0.
+ * Returns 0 if the requested range was decoded successfully, and an error code otherwise.
+ * Note that the chunk must be within bounds, and that if the range does not end at vertex_total_count, the trailing part of the encoded buffer is not validated.
+ */
+MESHOPTIMIZER_EXPERIMENTAL int meshopt_decodeVertexBufferChunk(void* destination, size_t vertex_offset, size_t vertex_count, size_t vertex_total_count, size_t vertex_size, const unsigned char* buffer, size_t buffer_size);
+
+/**
  * Get encoded vertex format version
  * Returns format version of the encoded vertex buffer, or -1 if the buffer header is invalid
  * Note that a non-negative value doesn't guarantee that the buffer will be decoded correctly if the input is malformed.
@@ -422,6 +451,58 @@ MESHOPTIMIZER_API void meshopt_decodeFilterOct(void* buffer, size_t count, size_
 MESHOPTIMIZER_API void meshopt_decodeFilterQuat(void* buffer, size_t count, size_t stride);
 MESHOPTIMIZER_API void meshopt_decodeFilterExp(void* buffer, size_t count, size_t stride);
 MESHOPTIMIZER_API void meshopt_decodeFilterColor(void* buffer, size_t count, size_t stride);
+
+/**
+ * glTF bufferView encoding mode, matching the values used by EXT_meshopt_compression/KHR_meshopt_compression
+ */
+enum meshopt_BufferViewMode
+{
+	meshopt_BufferViewMode_Attributes = 1,
+	meshopt_BufferViewMode_Triangles = 2,
+	meshopt_BufferViewMode_Indices = 3,
+};
+
+/**
+ * glTF bufferView filter, matching the values used by EXT_meshopt_compression/KHR_meshopt_compression
+ */
+enum meshopt_BufferViewFilter
+{
+	meshopt_BufferViewFilter_None = 0,
+	meshopt_BufferViewFilter_Octahedral = 1,
+	meshopt_BufferViewFilter_Quaternion = 2,
+	meshopt_BufferViewFilter_Exponential = 3,
+	meshopt_BufferViewFilter_Color = 4,
+};
+
+/**
+ * Description of a single meshopt-compressed glTF bufferView
+ *
+ * data/size point at the compressed payload from the extension; fallback/fallback_size point at the optional uncompressed fallback payload.
+ * If compressed data is not available (data is NULL or size is 0), the fallback payload is copied instead; the fallback payload must contain count * stride bytes.
+ * count and stride must match the values used during encoding; mode and filter must match the extension values.
+ */
+struct meshopt_BufferView
+{
+	const unsigned char* data;
+	size_t size;
+	const void* fallback;
+	size_t fallback_size;
+	size_t count;
+	size_t stride;
+	enum meshopt_BufferViewMode mode;
+	enum meshopt_BufferViewFilter filter;
+};
+
+/**
+ * Decodes a contiguous chunk of a meshopt-compressed glTF bufferView
+ *
+ * Only the requested [element_offset, element_offset + element_count) range is written to destination, which must contain element_count * stride bytes.
+ * Other bufferViews do not need to be decoded or allocated; this function does not allocate decoded memory.
+ * For attribute bufferViews, the filter (if any) is applied to the chunk; fallback data is already uncompressed and is copied as-is.
+ * For triangle bufferViews, element_offset and element_count must be multiples of 3.
+ * Returns 0 if decoding was successful, and a negative error code otherwise.
+ */
+MESHOPTIMIZER_EXPERIMENTAL int meshopt_decodeBufferViewChunk(void* destination, const struct meshopt_BufferView* view, size_t element_offset, size_t element_count);
 
 /**
  * Vertex buffer filter encoders

@@ -1871,6 +1871,106 @@ int meshopt_decodeVertexBuffer(void* destination, size_t vertex_count, size_t ve
 	return 0;
 }
 
+int meshopt_decodeVertexBufferChunk(void* destination, size_t vertex_offset, size_t vertex_count, size_t vertex_total_count, size_t vertex_size, const unsigned char* buffer, size_t buffer_size)
+{
+	using namespace meshopt;
+
+	assert(vertex_size > 0 && vertex_size <= 256);
+	assert(vertex_size % 4 == 0);
+
+	if (vertex_size == 0 || vertex_size > 256 || vertex_size % 4 != 0 || vertex_offset > vertex_total_count || vertex_count > vertex_total_count - vertex_offset)
+		return -4;
+
+	if ((!destination && vertex_count) || !buffer)
+		return -4;
+
+	const unsigned char* (*decode)(const unsigned char*, const unsigned char*, unsigned char*, size_t, size_t, unsigned char[256], const unsigned char*, int) = NULL;
+
+#if defined(SIMD_SSE) && defined(SIMD_FALLBACK)
+	const unsigned int cpumask = (1 << 9) | (1 << 23); // SSSE3+POPCNT
+	decode = (cpuid & cpumask) == cpumask ? decodeVertexBlockSimd : decodeVertexBlock;
+#elif defined(SIMD_SSE) || defined(SIMD_AVX) || defined(SIMD_NEON) || defined(SIMD_WASM)
+	decode = decodeVertexBlockSimd;
+#else
+	decode = decodeVertexBlock;
+#endif
+
+#if defined(SIMD_SSE) || defined(SIMD_NEON) || defined(SIMD_WASM)
+	assert(gDecodeBytesGroupInitialized);
+	(void)gDecodeBytesGroupInitialized;
+#endif
+
+	const unsigned char* data = buffer;
+	const unsigned char* data_end = buffer + buffer_size;
+
+	if (size_t(data_end - data) < 1)
+		return -2;
+
+	unsigned char data_header = *data++;
+
+	if ((data_header & 0xf0) != kVertexHeader)
+		return -1;
+
+	int version = data_header & 0x0f;
+	if (version > kDecodeVertexVersion)
+		return -1;
+
+	size_t tail_size = vertex_size + (version == 0 ? 0 : vertex_size / 4);
+	size_t tail_size_min = version == 0 ? kTailMinSizeV0 : kTailMinSizeV1;
+	size_t tail_size_pad = tail_size < tail_size_min ? tail_size_min : tail_size;
+
+	if (size_t(data_end - data) < tail_size_pad)
+		return -2;
+
+	const unsigned char* tail = data_end - tail_size;
+
+	unsigned char last_vertex[256];
+	memcpy(last_vertex, tail, vertex_size);
+
+	const unsigned char* channels = version == 0 ? NULL : tail + vertex_size;
+
+	size_t vertex_block_size = getVertexBlockSize(vertex_size);
+	size_t vertex_range_end = vertex_offset + vertex_count;
+	size_t vertex_block_offset = 0;
+
+	unsigned char scratch[kVertexBlockSizeBytes];
+
+	while (vertex_block_offset < vertex_range_end)
+	{
+		size_t block_size = (vertex_block_offset + vertex_block_size < vertex_total_count) ? vertex_block_size : vertex_total_count - vertex_block_offset;
+		size_t block_end = vertex_block_offset + block_size;
+
+		if (vertex_block_offset >= vertex_offset && block_end <= vertex_range_end)
+		{
+			unsigned char* target = static_cast<unsigned char*>(destination) + (vertex_block_offset - vertex_offset) * vertex_size;
+			data = decode(data, data_end, target, block_size, vertex_size, last_vertex, channels, version);
+		}
+		else
+		{
+			data = decode(data, data_end, scratch, block_size, vertex_size, last_vertex, channels, version);
+
+			if (data && block_end > vertex_offset)
+			{
+				size_t copy_offset = vertex_offset > vertex_block_offset ? vertex_offset - vertex_block_offset : 0;
+				size_t copy_end = vertex_range_end < block_end ? vertex_range_end - vertex_block_offset : block_size;
+
+				memcpy(static_cast<unsigned char*>(destination) + (vertex_block_offset + copy_offset - vertex_offset) * vertex_size,
+				    scratch + copy_offset * vertex_size, (copy_end - copy_offset) * vertex_size);
+			}
+		}
+
+		if (!data)
+			return -2;
+
+		vertex_block_offset = block_end;
+	}
+
+	if (vertex_range_end == vertex_total_count && size_t(data_end - data) != tail_size_pad)
+		return -3;
+
+	return 0;
+}
+
 #undef SIMD_NEON
 #undef SIMD_SSE
 #undef SIMD_AVX

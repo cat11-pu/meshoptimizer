@@ -381,15 +381,23 @@ int meshopt_decodeIndexVersion(const unsigned char* buffer, size_t buffer_size)
 	return version;
 }
 
-int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+static int decodeIndexBufferRange(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
 {
 	using namespace meshopt;
 
-	assert(index_count % 3 == 0);
 	assert(index_size == 2 || index_size == 4);
 
+	if (index_size != 2 && index_size != 4)
+		return -4;
+
+	if (index_total_count % 3 != 0 || index_offset % 3 != 0 || index_count % 3 != 0 || index_offset > index_total_count || index_count > index_total_count - index_offset)
+		return -4;
+
+	if ((!destination && index_count) || (!buffer && buffer_size) || !buffer)
+		return -4;
+
 	// the minimum valid encoding is header, 1 byte per triangle and a 16-byte codeaux table
-	if (buffer_size < 1 + index_count / 3 + 16)
+	if (buffer_size < 1 + index_total_count / 3 + 16)
 		return -2;
 
 	if ((buffer[0] & 0xf0) != kIndexHeader)
@@ -415,13 +423,17 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 
 	// since we store 16-byte codeaux table at the end, triangle data has to begin before data_safe_end
 	const unsigned char* code = buffer + 1;
-	const unsigned char* code_end = code + index_count / 3;
+	const unsigned char* code_end = code + index_total_count / 3;
 	const unsigned char* data = code_end;
 
 	// each triangle reads at most 16 bytes of data: 1b for codeaux and 5b for each free index
 	const unsigned char* data_safe_end = buffer + buffer_size - 16;
 
 	const unsigned char* codeaux_table = data_safe_end;
+
+	size_t triangle_offset = index_offset / 3;
+	size_t triangle_end = triangle_offset + index_count / 3;
+	size_t triangle_count = 0;
 
 	while (code < code_end)
 	{
@@ -479,7 +491,8 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 			pushEdgeFifo(edgefifo, a, c, edgefifooffset);
 
 			// output triangle
-			destination = writeTriangle(destination, index_size, a, b, c);
+			if (triangle_count >= triangle_offset && triangle_count < triangle_end)
+				destination = writeTriangle(destination, index_size, a, b, c);
 		}
 		else
 		{
@@ -509,7 +522,8 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 				next += fec0;
 
 				// output triangle
-				destination = writeTriangle(destination, index_size, a, b, c);
+				if (triangle_count >= triangle_offset && triangle_count < triangle_end)
+					destination = writeTriangle(destination, index_size, a, b, c);
 
 				// push vertex/edge fifo must match the encoding step *exactly* otherwise the data will not be decoded correctly
 				pushVertexFifo(vertexfifo, a, vertexfifooffset);
@@ -554,7 +568,8 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 					last = c = decodeIndex(data, last);
 
 				// output triangle
-				destination = writeTriangle(destination, index_size, a, b, c);
+				if (triangle_count >= triangle_offset && triangle_count < triangle_end)
+					destination = writeTriangle(destination, index_size, a, b, c);
 
 				// push vertex/edge fifo must match the encoding step *exactly* otherwise the data will not be decoded correctly
 				pushVertexFifo(vertexfifo, a, vertexfifooffset);
@@ -566,6 +581,8 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 				pushEdgeFifo(edgefifo, a, c, edgefifooffset);
 			}
 		}
+
+		++triangle_count;
 	}
 
 	// we should've read all data bytes and stopped at the boundary between data and codeaux table
@@ -573,6 +590,17 @@ int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t inde
 		return -3;
 
 	return 0;
+}
+
+int meshopt_decodeIndexBuffer(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+{
+	assert(index_count % 3 == 0);
+	return decodeIndexBufferRange(destination, 0, index_count, index_count, index_size, buffer, buffer_size);
+}
+
+int meshopt_decodeIndexBufferChunk(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+{
+	return decodeIndexBufferRange(destination, index_offset, index_count, index_total_count, index_size, buffer, buffer_size);
 }
 
 size_t meshopt_encodeIndexSequence(unsigned char* buffer, size_t buffer_size, const unsigned int* indices, size_t index_count)
@@ -644,12 +672,23 @@ size_t meshopt_encodeIndexSequenceBound(size_t index_count, size_t vertex_count)
 	return 1 + index_count * vertex_groups + 4;
 }
 
-int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+static int decodeIndexSequenceRange(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
 {
 	using namespace meshopt;
 
+	assert(index_size == 2 || index_size == 4);
+
+	if (index_size != 2 && index_size != 4)
+		return -4;
+
+	if (index_offset > index_total_count || index_count > index_total_count - index_offset)
+		return -4;
+
+	if ((!destination && index_count) || !buffer)
+		return -4;
+
 	// the minimum valid encoding is header, 1 byte per index and a 4-byte tail
-	if (buffer_size < 1 + index_count + 4)
+	if (buffer_size < 1 + index_total_count + 4)
 		return -2;
 
 	if ((buffer[0] & 0xf0) != kSequenceHeader)
@@ -663,8 +702,10 @@ int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t in
 	const unsigned char* data_safe_end = buffer + buffer_size - 4;
 
 	unsigned int last[2] = {};
+	size_t index_end = index_offset + index_count;
+	size_t output_count = 0;
 
-	for (size_t i = 0; i < index_count; ++i)
+	for (size_t i = 0; i < index_total_count; ++i)
 	{
 		// make sure we have enough data to read
 		// each index reads at most 5 bytes of data; there's a 4 byte tail after data_safe_end
@@ -685,13 +726,18 @@ int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t in
 		// update last for the next iteration that uses it
 		last[current] = index;
 
-		if (index_size == 2)
+		if (i >= index_offset && i < index_end)
 		{
-			static_cast<unsigned short*>(destination)[i] = (unsigned short)(index);
-		}
-		else
-		{
-			static_cast<unsigned int*>(destination)[i] = index;
+			if (index_size == 2)
+			{
+				static_cast<unsigned short*>(destination)[output_count] = (unsigned short)(index);
+			}
+			else
+			{
+				static_cast<unsigned int*>(destination)[output_count] = index;
+			}
+
+			++output_count;
 		}
 	}
 
@@ -700,4 +746,14 @@ int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t in
 		return -3;
 
 	return 0;
+}
+
+int meshopt_decodeIndexSequence(void* destination, size_t index_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+{
+	return decodeIndexSequenceRange(destination, 0, index_count, index_count, index_size, buffer, buffer_size);
+}
+
+int meshopt_decodeIndexSequenceChunk(void* destination, size_t index_offset, size_t index_count, size_t index_total_count, size_t index_size, const unsigned char* buffer, size_t buffer_size)
+{
+	return decodeIndexSequenceRange(destination, index_offset, index_count, index_total_count, index_size, buffer, buffer_size);
 }

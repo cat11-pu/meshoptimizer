@@ -239,6 +239,12 @@ codecbench-simd.wasm: tools/codecbench.cpp $(LIBRARY_SOURCES)
 codectest: tools/codectest.cpp $(LIBRARY)
 	$(CXX) $^ $(CXXFLAGS) $(LDFLAGS) -o $@
 
+streamtest: tools/streamtest.cpp $(LIBRARY)
+	$(CXX) $^ $(CXXFLAGS) -std=c++11 $(LDFLAGS) -o $@
+
+streambench: tools/streambench.cpp $(LIBRARY)
+	$(CXX) $^ $(CXXFLAGS) -std=c++11 $(LDFLAGS) -o $@
+
 codecfuzz: tools/codecfuzz.cpp src/vertexcodec.cpp src/indexcodec.cpp src/meshletcodec.cpp
 	$(CXX) $^ -fsanitize=fuzzer,address,undefined -O1 -g -o $@
 
